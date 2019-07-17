@@ -2,73 +2,62 @@ fn main() {
     let mut rt = Runtime::new();
 
     let main = || {
-        println!(
-            "Thread: {}. I want to read a file",
-            thread::current().name().unwrap()
-        );
+        println!("Thread: {}. I want to read test.txt", cur_thread());
         Fs::read("test.txt".to_string(), |result| {
-            // we could use a pointer and just cast it to our desired type
-            let text = if let Ops::FileRead(text) = result {
-                println!(
-                    "Thread: {}. The file contains {} characters.",
-                    thread::current().name().unwrap(),
-                    text.len()
-                );
-                text
-            } else {
-                panic!("Invalid result type.")
-            };
-
+            // this is easier when dealing with javascript since you cast it to the relevant type
+            // and there are no more checks...
+            let text = result.to_string().unwrap();
             println!(
-                "Thread: {}. I want to encrypt something.",
-                thread::current().name().unwrap()
+                "Thread: {}. First count: {} characters.",
+                cur_thread(),
+                text.len()
             );
+
+            println!("Thread: {}. I want to encrypt something.", cur_thread());
             Crypto::encrypt(text.len(), |result| {
-                if let Ops::Encrypt(n) = result {
-                    println!(
-                        "Thread: {}. The \"encrypted\" number is: {}",
-                        thread::current().name().unwrap(),
-                        n
-                    );
-                }
+                let n = result.to_int().unwrap();
+                println!(
+                    "Thread: {}. The \"encrypted\" number is: {}",
+                    cur_thread(),
+                    n
+                );
             })
         });
 
         // let's read the fil again and display the text
         println!(
-            "Thread: {}. I want to read the file a second time",
-            thread::current().name().unwrap()
+            "Thread: {}. I want to read test.txt a second time",
+            cur_thread()
         );
         Fs::read("test.txt".to_string(), |result| {
-            if let Ops::FileRead(text) = result {
-                println!(
-                    "Thread: {}. The file contains the following text:\n\n\"{}\"\n",
-                    thread::current().name().unwrap(),
-                    text
-                );
-            };
-        });
+            let text = result.to_string().unwrap();
+            println!(
+                "Thread: {}. Second count: {} characters.",
+                cur_thread(),
+                text.len()
+            );
 
-         // aaand one more time...
-        println!(
-            "Thread: {}. I want to read the file a third time",
-            thread::current().name().unwrap()
-        );
-        Fs::read("test.txt".to_string(), |result| {
-            if let Ops::FileRead(text) = result {
+            // aaand one more time once the second time has finished...
+            println!(
+                "Thread: {}. I want to read test.txt a third time and then print the text",
+                thread::current().name().unwrap()
+            );
+            Fs::read("test.txt".to_string(), |result| {
+                let text = result.to_string().unwrap();
                 println!(
                     "Thread: {}. The file contains the following text:\n\n\"{}\"\n",
-                    thread::current().name().unwrap(),
+                    cur_thread(),
                     text
                 );
-            };
+            });
         });
     };
 
-   
-
-
     rt.run(main);
+}
+
+fn cur_thread() -> String {
+    thread::current().name().unwrap().to_string()
 }
 
 static mut RUNTIME: usize = 0;
@@ -84,12 +73,12 @@ struct Runtime {
     available: Vec<usize>,
     callback_queue: Vec<Callback>,
     refs: usize,
-    status_reciever: Receiver<(usize, usize, Ops)>,
+    status_reciever: Receiver<(usize, usize, Js)>,
 }
 
 impl Runtime {
     fn new() -> Self {
-        let (status_sender, status_reciever) = channel::<(usize, usize, Ops)>();
+        let (status_sender, status_reciever) = channel::<(usize, usize, Js)>();
         let mut threads = Vec::with_capacity(4);
 
         for i in 0..4 {
@@ -100,14 +89,15 @@ impl Runtime {
                 .spawn(move || {
                     while let Ok(event) = evt_reciever.recv() {
                         println!(
-                            "Thread {}, recived a task.",
-                            thread::current().name().unwrap()
+                            "Thread {}, recived a task of type: {}",
+                            thread::current().name().unwrap(),
+                            event.kind,
                         );
                         let res = (event.task)();
                         println!(
                             "Thread {}, finished running a task of type: {}.",
                             thread::current().name().unwrap(),
-                            res
+                            event.kind
                         );
                         status_sender.send((i, event.callback_id, res)).unwrap();
                     }
@@ -159,14 +149,16 @@ impl Runtime {
 
     fn register_work(
         &mut self,
-        task: impl Fn() -> Ops + Send + 'static,
-        cb: impl Fn(Ops) + 'static,
+        task: impl Fn() -> Js + Send + 'static,
+        kind: EventKind,
+        cb: impl Fn(Js) + 'static,
     ) {
         self.callback_queue.push(Box::new(cb));
 
         let event = Event {
             task: Box::new(task),
             callback_id: self.callback_queue.len() - 1,
+            kind,
         };
 
         // we are not going to implement a real scheduler here, just a LIFO queue
@@ -177,19 +169,39 @@ impl Runtime {
 }
 
 #[derive(Debug)]
-enum Ops {
-    Nothing,
-    FileRead(String),
-    Encrypt(usize),
+enum Js {
+    Undefined,
+    String(String),
+    Int(usize),
 }
 
-impl fmt::Display for Ops {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use Ops::*;
+impl Js {
+    fn to_string(self) -> Option<String> {
         match self {
-            Nothing => write!(f, "Nothing"),
-            FileRead(_) => write!(f, "File read"),
-            Encrypt(_) => write!(f, "Encrypt"),
+            Js::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    fn to_int(self) -> Option<usize> {
+        match self {
+            Js::Int(n) => Some(n),
+            _ => None,
+        }
+    }
+}
+
+enum EventKind {
+    FileRead,
+    Encrypt,
+}
+
+impl fmt::Display for EventKind {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use EventKind::*;
+        match self {
+            FileRead => write!(f, "File read"),
+            Encrypt => write!(f, "Encrypt"),
         }
     }
 }
@@ -203,7 +215,7 @@ struct NodeThread {
 struct Crypto;
 
 impl Crypto {
-    fn encrypt(n: usize, cb: impl Fn(Ops) + 'static) {
+    fn encrypt(n: usize, cb: impl Fn(Js) + 'static) {
         let work = move || {
             fn fibonacchi(n: usize) -> usize {
                 match n {
@@ -214,17 +226,17 @@ impl Crypto {
             }
 
             let fib = fibonacchi(n);
-            Ops::Encrypt(fib)
+            Js::Int(fib)
         };
 
         let rt = unsafe { &mut *(RUNTIME as *mut Runtime) };
-        rt.register_work(work, cb);
+        rt.register_work(work, EventKind::Encrypt, cb);
     }
 }
 
 struct Fs;
 impl Fs {
-    fn read(path: String, cb: impl Fn(Ops) + 'static) {
+    fn read(path: String, cb: impl Fn(Js) + 'static) {
         let work = move || {
             // Let's simulate that there is a large file we're reading allowing us to actually
             // observe how the code is executed
@@ -234,17 +246,18 @@ impl Fs {
                 .unwrap()
                 .read_to_string(&mut buffer)
                 .unwrap();
-            Ops::FileRead(buffer)
+            Js::String(buffer)
         };
 
         let rt = unsafe { &mut *(RUNTIME as *mut Runtime) };
-        rt.register_work(work, cb);
+        rt.register_work(work, EventKind::FileRead, cb);
     }
 }
 
 struct Event {
-    task: Box<Fn() -> Ops + Send + 'static>,
+    task: Box<Fn() -> Js + Send + 'static>,
     callback_id: usize,
+    kind: EventKind,
 }
 
-type Callback = Box<Fn(Ops)>;
+type Callback = Box<Fn(Js)>;
