@@ -1,72 +1,117 @@
-fn main() {
-    let mut rt = Runtime::new();
+/// Think of this function as the javascript program you have written which is then
+/// run by the runtime
+fn javascript() {
+    println!("Thread: {}. Initiating read of test.txt", current());
+    Fs::read("test.txt", |result| {
+        // this is easier when dealing with javascript since you cast it to the relevant type
+        // and there are no more checks...
+        let text = result.to_string().unwrap();
+        let len = text.len();
+        println!("Thread: {}. First count: {} characters.", current(), len);
 
-    let main = || {
-        println!("Thread: {}. I want to read test.txt", cur_thread());
-        Fs::read("test.txt".to_string(), |result| {
-            // this is easier when dealing with javascript since you cast it to the relevant type
-            // and there are no more checks...
-            let text = result.to_string().unwrap();
-            println!(
-                "Thread: {}. First count: {} characters.",
-                cur_thread(),
-                text.len()
-            );
+        println!("Thread: {}. I want to encrypt something.", current());
+        Crypto::encrypt(text.len(), |result| {
+            let n = result.to_int().unwrap();
+            println!("Thread: {}. \"Encrypted\" number is: {}", current(), n);
+        })
+    });
 
-            println!("Thread: {}. I want to encrypt something.", cur_thread());
-            Crypto::encrypt(text.len(), |result| {
-                let n = result.to_int().unwrap();
-                println!(
-                    "Thread: {}. The \"encrypted\" number is: {}",
-                    cur_thread(),
-                    n
-                );
-            })
-        });
+    // let's read the file again and display the text
+    println!(
+        "Thread: {}. I want to read test.txt a second time",
+        current()
+    );
+    Fs::read("test.txt", |result| {
+        let text = result.to_string().unwrap();
+        let len = text.len();
+        println!("Thread: {}. Second count: {} characters.", current(), len);
 
-        // let's read the fil again and display the text
+        // aaand one more time but not in parallell.
         println!(
-            "Thread: {}. I want to read test.txt a second time",
-            cur_thread()
+            "Thread: {}. I want to read test.txt a third time and then print the text",
+            current()
         );
-        Fs::read("test.txt".to_string(), |result| {
+        Fs::read("test.txt", |result| {
             let text = result.to_string().unwrap();
             println!(
-                "Thread: {}. Second count: {} characters.",
-                cur_thread(),
-                text.len()
+                "Thread: {}. The file contains the following text:\n\n\"{}\"\n",
+                current(),
+                text
             );
-
-            // aaand one more time once the second time has finished...
-            println!(
-                "Thread: {}. I want to read test.txt a third time and then print the text",
-                thread::current().name().unwrap()
-            );
-            Fs::read("test.txt".to_string(), |result| {
-                let text = result.to_string().unwrap();
-                println!(
-                    "Thread: {}. The file contains the following text:\n\n\"{}\"\n",
-                    cur_thread(),
-                    text
-                );
-            });
         });
-    };
-
-    rt.run(main);
+    });
 }
 
-fn cur_thread() -> String {
+fn current() -> String {
     thread::current().name().unwrap().to_string()
 }
 
-static mut RUNTIME: usize = 0;
+fn main() {
+    let mut rt = Runtime::new();
+    rt.run(javascript);
+}
+
+// ===== THIS IS OUR "NODE LIBRARY" =====
 
 use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
+
+static mut RUNTIME: usize = 0;
+
+type Callback = Box<Fn(Js)>;
+
+struct Event {
+    task: Box<Fn() -> Js + Send + 'static>,
+    callback_id: usize,
+    kind: EventKind,
+}
+
+enum EventKind {
+    FileRead,
+    Encrypt,
+}
+
+impl fmt::Display for EventKind {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use EventKind::*;
+        match self {
+            FileRead => write!(f, "File read"),
+            Encrypt => write!(f, "Encrypt"),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Js {
+    Undefined,
+    String(String),
+    Int(usize),
+}
+
+impl Js {
+    fn to_string(self) -> Option<String> {
+        match self {
+            Js::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    fn to_int(self) -> Option<usize> {
+        match self {
+            Js::Int(n) => Some(n),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NodeThread {
+    handle: JoinHandle<()>,
+    sender: Sender<Event>,
+}
 
 struct Runtime {
     thread_pool: Box<[NodeThread]>,
@@ -121,10 +166,12 @@ impl Runtime {
         }
     }
 
+    // This is the event loop
     fn run(&mut self, f: impl Fn()) {
         let rt_ptr: *mut Runtime = self;
         unsafe { RUNTIME = rt_ptr as usize };
 
+        // First we run our "main" function
         f();
         while self.refs > 0 {
             // First poll any epoll/kqueue
@@ -168,49 +215,7 @@ impl Runtime {
     }
 }
 
-#[derive(Debug)]
-enum Js {
-    Undefined,
-    String(String),
-    Int(usize),
-}
-
-impl Js {
-    fn to_string(self) -> Option<String> {
-        match self {
-            Js::String(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    fn to_int(self) -> Option<usize> {
-        match self {
-            Js::Int(n) => Some(n),
-            _ => None,
-        }
-    }
-}
-
-enum EventKind {
-    FileRead,
-    Encrypt,
-}
-
-impl fmt::Display for EventKind {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use EventKind::*;
-        match self {
-            FileRead => write!(f, "File read"),
-            Encrypt => write!(f, "Encrypt"),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct NodeThread {
-    handle: JoinHandle<()>,
-    sender: Sender<Event>,
-}
+// ===== THIS IS PLUGINS CREATED IN C++ FOR THE NODE RUNTIME OR PART OF THE RUNTIME ITSELF =====
 
 struct Crypto;
 
@@ -236,7 +241,7 @@ impl Crypto {
 
 struct Fs;
 impl Fs {
-    fn read(path: String, cb: impl Fn(Js) + 'static) {
+    fn read(path: &'static str, cb: impl Fn(Js) + 'static) {
         let work = move || {
             // Let's simulate that there is a large file we're reading allowing us to actually
             // observe how the code is executed
@@ -253,11 +258,3 @@ impl Fs {
         rt.register_work(work, EventKind::FileRead, cb);
     }
 }
-
-struct Event {
-    task: Box<Fn() -> Js + Send + 'static>,
-    callback_id: usize,
-    kind: EventKind,
-}
-
-type Callback = Box<Fn(Js)>;
