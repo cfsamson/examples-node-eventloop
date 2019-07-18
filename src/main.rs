@@ -174,6 +174,8 @@ impl Runtime {
         // First we run our "main" function
         f();
         while self.refs > 0 {
+            // check timers?
+
             // First poll any epoll/kqueue
 
             // then check if there is any results from the threadpool
@@ -183,6 +185,9 @@ impl Runtime {
                 self.refs -= 1;
                 self.available.push(thread_id);
             }
+
+            // Let the OS have a time slice of our thread so we don't busy loop
+            thread::sleep(std::time::Duration::from_millis(1));
         }
     }
 
@@ -212,6 +217,11 @@ impl Runtime {
         let available = self.schedule();
         self.thread_pool[available].sender.send(event).unwrap();
         self.refs += 1;
+    }
+
+    fn register_immidiate(&mut self, cb: impl Fn(Js) + 'static) {
+        let cb = Box::new(cb);
+        self.callback_queue.push(cb);
     }
 }
 
@@ -243,7 +253,7 @@ struct Fs;
 impl Fs {
     fn read(path: &'static str, cb: impl Fn(Js) + 'static) {
         let work = move || {
-            // Let's simulate that there is a large file we're reading allowing us to actually
+            // Let's simulate that there is a very large file we're reading allowing us to actually
             // observe how the code is executed
             thread::sleep(std::time::Duration::from_secs(2));
             let mut buffer = String::new();
@@ -257,4 +267,44 @@ impl Fs {
         let rt = unsafe { &mut *(RUNTIME as *mut Runtime) };
         rt.register_work(work, EventKind::FileRead, cb);
     }
+}
+
+fn settimeout(ms: u32, cb: impl Fn(Js) + 'static) {
+    let rt = unsafe { &mut *(RUNTIME as *mut Runtime) };
+    if ms == 0 {
+        rt.register_immidiate(cb);
+    }
+}
+
+#[repr(C)]
+struct EpollEvent {}
+#[link(name = "c")]
+extern "C" {
+    static EPOLL_CTL_ADD: i32;
+    static EPOLLIN: i32;
+    static EPOLLOUT: i32;
+    static EPOLLET: i32;
+
+    /// Returns: positive: file descriptor, negative: error
+    fn epoll_create(size: i32) -> i32;
+    /// Returns: nothing, all non zero return values is an error
+    fn epoll_ctl(epfd: i32, op: i32, fd: i32, epoll_event: *const EpollEvent) -> i32;
+    /// Returns: positive: number of file descriptors ready for the requested I/O, -1: Error
+    /// epoll_events is a bitmask composed by OR'ing zero or more predefined event types
+    fn epoll_wait(epfd: i32, epoll_events: *const Event, maxevents: i32, timeout: i32) -> i32;
+}
+
+use std::net::TcpListener;
+use std::os::unix::io::IntoRawFd;
+
+struct Http;
+impl Http {
+   fn get(){
+    let listener = TcpListener::bind("0.0.0.0:80").unwrap();
+    // https://doc.rust-lang.org/std/os/unix/io/trait.IntoRawFd.html#tymethod.into_raw_fd
+    let fd = listener.into_raw_fd();
+
+    epoll_create(1);
+    
+   } 
 }
