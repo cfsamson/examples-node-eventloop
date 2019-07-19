@@ -276,6 +276,9 @@ fn settimeout(ms: u32, cb: impl Fn(Js) + 'static) {
     }
 }
 
+// ===== EPOLL, KQUEUE =====
+use std::ffi::c_void;
+
 #[cfg(target_os = "linux")]
 #[repr(C)]
 struct EpollEvent {
@@ -298,7 +301,8 @@ extern "C" {
     fn epoll_wait(epfd: i32, epoll_events: *const Event, maxevents: i32, timeout: i32) -> i32;
 }
 
-type c_void = std::ffi::c_void;
+
+
 #[cfg(target_os = "macos")]
 #[repr(C)]
 // https://github.com/rust-lang/libc/blob/c8aa8ec72d631bc35099bcf5d634cf0a0b841be0/src/unix/bsd/apple/mod.rs#L497
