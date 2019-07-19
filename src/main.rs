@@ -276,8 +276,12 @@ fn settimeout(ms: u32, cb: impl Fn(Js) + 'static) {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
-struct EpollEvent {}
+struct EpollEvent {
+    events: i32,
+}
+#[cfg(target_os = "linux")]
 #[link(name = "c")]
 extern "C" {
     static EPOLL_CTL_ADD: i32;
@@ -294,17 +298,73 @@ extern "C" {
     fn epoll_wait(epfd: i32, epoll_events: *const Event, maxevents: i32, timeout: i32) -> i32;
 }
 
+type c_void = std::ffi::c_void;
+#[cfg(target_os = "macos")]
+#[repr(C)]
+// https://github.com/rust-lang/libc/blob/c8aa8ec72d631bc35099bcf5d634cf0a0b841be0/src/unix/bsd/apple/mod.rs#L497
+pub struct kevent {
+        pub ident: i64, //::uintptr_t,
+        pub filter: i16,
+        pub flags: u16,
+        pub fflags: u32,
+        pub data: i64, //::intptr_t,
+        pub udata: *mut c_void,
+}
+#[cfg(target_os = "macos")]
+#[link(name = "c")]
+extern "C" {
+    static EPOLL_CTL_ADD: i32;
+    static EPOLLIN: i32;
+    static EPOLLOUT: i32;
+    static EPOLLET: i32;
+
+    /// Returns: positive: file descriptor, negative: error
+    fn kqueue() -> i32;
+    /// Returns: nothing, all non zero return values is an error
+    fn kevent(epfd: i32, op: i32, fd: i32, epoll_event: *const EpollEvent) -> i32;
+}
+
 use std::net::TcpListener;
 use std::os::unix::io::IntoRawFd;
+use std::io;
+
+mod mio {
+    use super::*;
+    
+    struct Socket;
+    impl Socket {
+        fn tcp_listen() {
+            let queue = kqueue();
+
+        }
+    }
+}
+
+
 
 struct Http;
 impl Http {
-   fn get(){
+   fn get() -> io::Result<()> {
     let listener = TcpListener::bind("0.0.0.0:80").unwrap();
     // https://doc.rust-lang.org/std/os/unix/io/trait.IntoRawFd.html#tymethod.into_raw_fd
     let fd = listener.into_raw_fd();
 
-    epoll_create(1);
-    
+    unsafe {
+        let fd = epoll_create(1);
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let event = EpollEvent {
+            events: EPOLLIN | EPOLLOUT,
+        };
+
+        let res = epoll_ctl(fd, EPOLL_CTL_ADD, fd, &event as *const EpollEvent);
+        if res < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    Ok(())
    } 
 }
