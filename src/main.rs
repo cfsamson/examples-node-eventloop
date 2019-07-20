@@ -41,8 +41,15 @@ fn javascript() {
         });
     });
 
-    Io::timeout(2500, |res| {
-        println!("Timer timed out");
+    Io::timeout(3000, |res| {
+        println!("Thread: {}.Timer1 timed out", current());
+        Io::timeout(1500, |res| {
+            println!("Thread: {}. Timer3(nested) timed out", current());
+        });
+    });
+
+    Io::timeout(1000, |res| {
+        println!("Thread: {}.Timer2 timed out", current());
     });
 }
 
@@ -125,7 +132,8 @@ struct Runtime {
     threadp_reciever: Receiver<(usize, usize, Js)>,
     epoll_reciever: Receiver<usize>,
     epoll_queue: i32,
-    epoll_starer: Sender<()>,
+    epoll_pending: usize,
+    epoll_starter: Sender<usize>,
 }
 
 impl Runtime {
@@ -167,25 +175,28 @@ impl Runtime {
         // ===== EPOLL THREAD =====
         // Only wakes up when there is a task ready
         let (epoll_sender, epoll_reciever) = channel::<usize>();
-        let (epoll_start_sender, epoll_start_reciever) = channel::<()>();
+        let (epoll_start_sender, epoll_start_reciever) = channel::<usize>();
         let queue = minimio::queue().expect("Error creating epoll queue");
-        thread::spawn(move || {
-            if 
-              loop {
+        thread::spawn(move || loop {
+            let mut changes = vec![];
+            while let Ok(current_event_count) = epoll_start_reciever.recv() {
+                println!("cur_evt_count: {}", current_event_count);
+                if changes.len() < current_event_count {
+                    let missing = current_event_count - changes.len();
+                    (0..missing).for_each(|_| changes.push(minimio::Event::default()));
+                }
                 match minimio::poll(queue, changes.as_mut_slice(), 0, None) {
                     Ok(v) if v > 0 => {
-                        
-                        // changes is reset and populated with new events
                         for i in 0..v {
                             let event = changes.get(i).expect("No events in event list.");
                             epoll_sender.send(event.ident as usize).unwrap();
+                            changes.remove(i);
                         }
-                        
-                    },
+                    }
                     Err(e) => panic!("{:?}", e),
                     _ => (),
                 }
-                }
+            }
         });
 
         Runtime {
@@ -196,7 +207,8 @@ impl Runtime {
             threadp_reciever,
             epoll_reciever,
             epoll_queue: queue,
-            epoll_eventlist: vec![],
+            epoll_pending: 0,
+            epoll_starter: epoll_start_sender,
         }
     }
 
@@ -213,6 +225,7 @@ impl Runtime {
                 let cb = &self.callback_queue[callback_id];
                 cb(Js::Undefined);
                 self.refs -= 1;
+                self.epoll_pending -= 1;
             }
 
             // then check if there is any results from the threadpool
@@ -223,6 +236,7 @@ impl Runtime {
                 self.available.push(thread_id);
             }
         }
+        println!("FINISHED");
     }
 
     fn schedule(&mut self) -> usize {
@@ -238,12 +252,16 @@ impl Runtime {
 
         let cb_id = self.callback_queue.len() - 1;
         // let's make this very simple and set the event identity equal to our callback id
-        // this could be handled in many other (and better) ways though
+        // this could be handled in many other (and better) ways though since this will at one
+        // point hit a max if the system is running long enough
         event.ident = cb_id as u64;
-        minimio::add_event(self.epoll_queue, &[event.clone()], 0).expect("Error adding event to queue.");
-        self.epoll_eventlist.push(event);
+        minimio::add_event(self.epoll_queue, &[event.clone()], 0)
+            .expect("Error adding event to queue.");
+
         println!("Event with id: {} registered.", cb_id);
         self.refs += 1;
+        self.epoll_pending += 1;
+        self.epoll_starter.send(self.epoll_pending);
     }
 
     fn register_work(
@@ -338,7 +356,12 @@ mod minimio {
     #[cfg(target_os = "macos")]
     pub type Event = macos::ffi::Kevent;
 
-    pub fn poll(queue: i32, changelist: &mut [Event], timeout: usize, max_events: Option<i32>) -> io::Result<usize> {
+    pub fn poll(
+        queue: i32,
+        changelist: &mut [Event],
+        timeout: usize,
+        max_events: Option<i32>,
+    ) -> io::Result<usize> {
         if cfg!(target_os = "macos") {
             macos::kevent(queue, &[], changelist, timeout)
         } else {
@@ -359,12 +382,12 @@ mod minimio {
         if cfg!(target_os = "macos") {
             Event {
                 ident: 0,
-                filter: unsafe {macos::EVFILT_TIMER},
-                flags: unsafe {macos::EV_ADD | macos::EV_ENABLE | macos::EV_ONESHOT},
+                filter: unsafe { macos::EVFILT_TIMER },
+                flags: unsafe { macos::EV_ADD | macos::EV_ENABLE | macos::EV_ONESHOT },
                 fflags: 0,
                 data: timeout_ms,
                 udata: 0,
-                ext: [0,0],
+                ext: [0, 0],
             }
         } else {
             unimplemented!()
@@ -382,57 +405,63 @@ mod minimio {
         pub const EV_ONESHOT: u16 = 0x10;
 
         pub mod ffi {
-                #[derive(Debug, Clone)]
-        #[repr(C)]
-        // https://github.com/rust-lang/libc/blob/c8aa8ec72d631bc35099bcf5d634cf0a0b841be0/src/unix/bsd/apple/mod.rs#L497
-        // https://github.com/rust-lang/libc/blob/c8aa8ec72d631bc35099bcf5d634cf0a0b841be0/src/unix/bsd/apple/mod.rs#L207
-        pub struct Kevent {
-            pub ident: u64,
-            pub filter: i16,
-            pub flags: u16,
-            pub fflags: u32,
-            pub data: i64,
-            pub udata: u64,
-            pub ext: [u64; 2],
-        }
-        #[link(name = "c")]
-        extern {
-            /// Returns: positive: file descriptor, negative: error
-            pub(super) fn kqueue() -> i32;
-            /// Returns: nothing, all non zero return values is an error
-            //fn kevent(epfd: i32, op: i32, fd: i32, epoll_event: *const Kevent) -> i32;
-            pub(super) fn kevent(
-                kq: i32,
-                changelist: *const Kevent,
-                nchanges: i32,
-                eventlist: *mut Kevent,
-                nevents: i32,
-                timeout: usize,
-            ) -> i32;
-        }
+
+            #[derive(Debug, Clone, Default)]
+            #[repr(C)]
+            // https://github.com/rust-lang/libc/blob/c8aa8ec72d631bc35099bcf5d634cf0a0b841be0/src/unix/bsd/apple/mod.rs#L497
+            // https://github.com/rust-lang/libc/blob/c8aa8ec72d631bc35099bcf5d634cf0a0b841be0/src/unix/bsd/apple/mod.rs#L207
+            pub struct Kevent {
+                pub ident: u64,
+                pub filter: i16,
+                pub flags: u16,
+                pub fflags: u32,
+                pub data: i64,
+                pub udata: u64,
+                pub ext: [u64; 2],
+            }
+            #[link(name = "c")]
+            extern "C" {
+                /// Returns: positive: file descriptor, negative: error
+                pub(super) fn kqueue() -> i32;
+                /// Returns: nothing, all non zero return values is an error
+                //fn kevent(epfd: i32, op: i32, fd: i32, epoll_event: *const Kevent) -> i32;
+                pub(super) fn kevent(
+                    kq: i32,
+                    changelist: *const Kevent,
+                    nchanges: i32,
+                    eventlist: *mut Kevent,
+                    nevents: i32,
+                    timeout: usize,
+                ) -> i32;
+            }
         }
         pub fn timeout_event(timer: i64) -> ffi::Kevent {
-             let event = ffi::Kevent {
+            let event = ffi::Kevent {
                 ident: 1,
-                filter: unsafe {EVFILT_TIMER},
-                flags: unsafe {EV_ADD | EV_ENABLE | EV_ONESHOT},
+                filter: unsafe { EVFILT_TIMER },
+                flags: unsafe { EV_ADD | EV_ENABLE | EV_ONESHOT },
                 fflags: 0,
                 data: timer,
                 udata: 0,
-                ext: [0,0],
+                ext: [0, 0],
             };
             event
-        } 
+        }
 
         pub fn kqueue() -> io::Result<i32> {
-            let fd = unsafe {ffi::kqueue()};
+            let fd = unsafe { ffi::kqueue() };
             if fd < 0 {
                 return Err(io::Error::last_os_error());
             }
             Ok(fd)
         }
 
-        pub fn kevent(kq: RawFd, cl: &[Kevent], el: &mut [Kevent], timeout: usize) -> io::Result<usize> {
+        pub fn kevent(
+            kq: RawFd,
+            cl: &[Kevent],
+            el: &mut [Kevent],
+            timeout: usize,
+        ) -> io::Result<usize> {
             let res = unsafe {
                 let kq = kq as i32;
                 let cl_len = cl.len() as i32;
