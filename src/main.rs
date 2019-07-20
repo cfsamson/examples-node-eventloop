@@ -118,17 +118,17 @@ struct Runtime {
     available: Vec<usize>,
     callback_queue: Vec<Callback>,
     refs: usize,
-    status_reciever: Receiver<(usize, usize, Js)>,
+    threadp_reciever: Receiver<(usize, usize, Js)>,
 }
 
 impl Runtime {
     fn new() -> Self {
-        let (status_sender, status_reciever) = channel::<(usize, usize, Js)>();
+        let (threadp_sender, threadp_reciever) = channel::<(usize, usize, Js)>();
         let mut threads = Vec::with_capacity(4);
 
         for i in 0..4 {
             let (evt_sender, evt_reciever) = channel::<Event>();
-            let status_sender = status_sender.clone();
+            let threadp_sender = threadp_sender.clone();
             let handle = thread::Builder::new()
                 .name(i.to_string())
                 .spawn(move || {
@@ -144,7 +144,7 @@ impl Runtime {
                             thread::current().name().unwrap(),
                             event.kind
                         );
-                        status_sender.send((i, event.callback_id, res)).unwrap();
+                        threadp_sender.send((i, event.callback_id, res)).unwrap();
                     }
                 })
                 .expect("Couldn't initialize thread pool.");
@@ -162,7 +162,7 @@ impl Runtime {
             available: (0..4).collect(),
             callback_queue: Vec::new(),
             refs: 0,
-            status_reciever,
+            threadp_reciever,
         }
     }
 
@@ -177,7 +177,7 @@ impl Runtime {
             // First poll any epoll/kqueue
 
             // then check if there is any results from the threadpool
-            if let Ok((thread_id, callback_id, data)) = self.status_reciever.try_recv() {
+            if let Ok((thread_id, callback_id, data)) = self.threadp_reciever.try_recv() {
                 let cb = &self.callback_queue[callback_id];
                 cb(data);
                 self.refs -= 1;
