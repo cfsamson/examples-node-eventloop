@@ -338,11 +338,6 @@ impl Runtime {
         self.thread_pool[available].sender.send(event).unwrap();
         self.refs += 1;
     }
-
-    fn register_immidiate(&mut self, cb: impl Fn(Js) + 'static) {
-        let cb = Box::new(cb);
-        self.callback_queue.push(cb);
-    }
 }
 
 // ===== THIS IS PLUGINS CREATED IN C++ FOR THE NODE RUNTIME OR PART OF THE RUNTIME ITSELF =====
