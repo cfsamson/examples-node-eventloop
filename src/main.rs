@@ -39,6 +39,21 @@ fn javascript() {
         });
     });
 
+    Io::timeout(3000, |_res| {
+        println!("Thread: {}.Timer1 timed out", current());
+        Io::timeout(1500, |_res| {
+            println!("Thread: {}. Timer3(nested) timed out", current());
+        });
+    });
+
+    Io::timeout(3000, |_res| {
+        println!("Thread: {}.Timer1 timed out", current());
+        Io::timeout(1500, |_res| {
+            println!("Thread: {}. Timer3(nested) timed out", current());
+        });
+    });
+
+
     Io::http_get_slow("http//www.google.com", 5000, |result| {
         let result = result.into_string().unwrap();
         println!("\n===== START WEB RESPONSE =====");
@@ -64,6 +79,7 @@ use std::io::{self, Read, Write};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
+const MAX_EPOLL_EVENTS: usize  = 1024;
 static mut RUNTIME: usize = 0;
 
 type Callback = Box<FnOnce(Js)>;
@@ -178,23 +194,26 @@ impl Runtime {
         thread::Builder::new()
             .name("epoll".to_string())
             .spawn(move || loop {
-                let mut changes = vec![];
+                let mut changes: Vec<minimio::Event> = (0..MAX_EPOLL_EVENTS)
+                .map(|_| minimio::Event::default())
+                .collect();
+
                 while let Ok(current_event_count) = epoll_start_reciever.recv() {
-                    if changes.len() < current_event_count {
-                        let missing = current_event_count - changes.len();
-                        (0..missing).for_each(|_| changes.push(minimio::Event::default()));
-                    }
+                    // if changes.len() < current_event_count {
+                    //     let missing = current_event_count - changes.len();
+                    //     (0..missing).for_each(|_| changes.push(minimio::Event::default()));
+                    // }
                     match minimio::poll(queue, changes.as_mut_slice(), 0, None) {
                         Ok(v) if v > 0 => {
                             for i in 0..v {
-                                let event = changes.get(i).expect("No events in event list.");
+                                let event = changes.get_mut(i).expect("No events in event list.");
                                 println!(
                                     "Thread {}: epoll event {} is ready",
                                     current(),
                                     event.ident
                                 );
                                 epoll_sender.send(event.ident as usize).unwrap();
-                                changes.remove(i);
+                                //*event = minimio::Event::default();
                             }
                         }
                         Err(e) => panic!("{:?}", e),
@@ -299,8 +318,13 @@ impl Runtime {
         }
     }
 
-    fn register_io(&mut self, event: minimio::Event, cb: impl FnOnce(Js) + 'static) {
+    fn register_io(&mut self, mut event: minimio::Event, cb: impl FnOnce(Js) + 'static) {
         let cb_id = self.add_callback(cb) as i64;
+
+        // if no ident is set, set it equal to cb_id + 1 000 000 
+        if event.ident == 0 {
+            event.ident = cb_id as u64 + 1_000_000;
+        }
         println!(
             "Thread {}: Event with id: {} registered.",
             current(),
