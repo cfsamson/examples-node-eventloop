@@ -42,12 +42,17 @@ fn javascript() {
     });
 
     p("Registering a 3000 ms timeout");
-    Io::timeout(1000, |_res| {
+    set_timeout(3000, |_res| {
         p("3000ms timer timed out");
-        Io::timeout(500, |_res| {
-            p("1500ms timer(nested) timed out");
+        set_timeout(500, |_res| {
+            p("500ms timer(nested) timed out");
         });
     });
+
+    p("Registering a 1000 ms timeout");
+    set_timeout(1000,  |_res| {
+            p("SETTIMEOUT");
+        });
 
     p("Registering http get request to google.com");
     Io::http_get_slow("http//www.google.com", 2000, |result| {
@@ -60,9 +65,13 @@ fn p(t: impl std::fmt::Display) {
 }
 
 fn p_content(t: impl std::fmt::Display, decr: &str) {
-        println!("\n===== THREAD {} START CONTENT - {} =====", current(), decr.to_uppercase());
-        println!("{}", t);
-        println!("===== END CONTENT =====\n");
+    println!(
+        "\n===== THREAD {} START CONTENT - {} =====",
+        current(),
+        decr.to_uppercase()
+    );
+    println!("{}", t);
+    println!("===== END CONTENT =====\n");
 }
 
 fn current() -> String {
@@ -75,14 +84,17 @@ fn main() {
 }
 
 // ===== THIS IS OUR "NODE LIBRARY" =====
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
+use std::time::{Instant, Duration};
 
-const MAX_EPOLL_EVENTS: usize  = 1024;
+mod minimio;
+
+const MAX_EPOLL_EVENTS: usize = 1024;
 static mut RUNTIME: usize = 0;
 
 type Callback = Box<FnOnce(Js)>;
@@ -143,14 +155,16 @@ struct Runtime {
     thread_pool: Box<[NodeThread]>,
     available: Vec<usize>,
     callback_queue: HashMap<usize, Callback>,
+    next_tick_callbacks: Vec<(usize, Js)>,
     identity_token: usize,
-    refs: usize,
+    pending_events: usize,
     threadp_reciever: Receiver<(usize, usize, Js)>,
     epoll_reciever: Receiver<usize>,
     epoll_queue: i32,
     epoll_pending: usize,
     epoll_starter: Sender<usize>,
     epoll_event_cb_map: HashMap<i64, usize>,
+    timers: BTreeMap<Instant, usize>,
 }
 
 impl Runtime {
@@ -167,7 +181,7 @@ impl Runtime {
                     while let Ok(event) = evt_reciever.recv() {
                         p(format!("recived a task of type: {}", event.kind));
                         let res = (event.task)();
-                        p(format!("finished running a task of type: {}.",event.kind));
+                        p(format!("finished running a task of type: {}.", event.kind));
                         threadp_sender.send((i, event.callback_id, res)).unwrap();
                     }
                 })
@@ -207,7 +221,7 @@ impl Runtime {
                         Ok(v) if v > 0 => {
                             for i in 0..v {
                                 let event = changes.get_mut(i).expect("No events in event list.");
-                                p(format!("epoll event {} is ready",event.ident));
+                                p(format!("epoll event {} is ready", event.ident));
                                 epoll_sender.send(event.ident as usize).unwrap();
                             }
                         }
@@ -222,14 +236,16 @@ impl Runtime {
             thread_pool: threads.into_boxed_slice(),
             available: (0..4).collect(),
             callback_queue: HashMap::new(),
+            next_tick_callbacks: vec![],
             identity_token: 0,
-            refs: 0,
+            pending_events: 0,
             threadp_reciever,
             epoll_reciever,
             epoll_queue: queue,
             epoll_pending: 0,
             epoll_starter: epoll_start_sender,
             epoll_event_cb_map: HashMap::new(),
+            timers: BTreeMap::new(),
         }
     }
 
@@ -238,15 +254,43 @@ impl Runtime {
         let rt_ptr: *mut Runtime = self;
         unsafe { RUNTIME = rt_ptr as usize };
 
+        let mut timers_to_remove = vec![]; // avoid allocating on every loop
+        let  mut ticks = 0; // just for us priting out
         // First we run our "main" function
         f();
 
-        // The we check that we we don't have any more
-        while self.refs > 0 {
-            // Check if we have any timer events that have expired
+        
 
+        // The we check that we we still have outstanding tasks in the pipeline
+        while self.pending_events > 0 {
+            ticks += 1;
+            if !self.next_tick_callbacks.is_empty() {
+                p(format!("===== TICK {} =====", ticks));
+            }
+
+            // ===== TIMERS =====
+            self.timers
+            .range(..=Instant::now())
+            .for_each(|(k,_)| timers_to_remove.push(*k));
+
+            while let Some(key) = timers_to_remove.pop() {
+                let callback_id = self.timers.remove(&key).unwrap();
+                self.next_tick_callbacks.push((callback_id, Js::Undefined));
+            }
+
+            // ===== CALLBACKS =====
+            while let Some((callback_id, data)) = self.next_tick_callbacks.pop() {
+                let cb = self.callback_queue.remove(&callback_id).unwrap();
+                cb(data);
+                self.pending_events -= 1;
+            }
+
+            // ===== IDLE/PREPARE =====
+            // we won't use this
+
+            // ===== POLL =====
             // First poll any epoll/kqueue
-            if let Ok(event_id) = self.epoll_reciever.try_recv() {
+            while let Ok(event_id) = self.epoll_reciever.try_recv() {
                 let id = self
                     .epoll_event_cb_map
                     .get(&(event_id as i64))
@@ -254,19 +298,22 @@ impl Runtime {
                 let callback_id = *id;
                 self.epoll_event_cb_map.remove(&(event_id as i64));
 
-                let cb = self.callback_queue.remove(&callback_id).unwrap();
-                cb(Js::Undefined);
-                self.refs -= 1;
+                self.next_tick_callbacks.push((callback_id, Js::Undefined));
                 self.epoll_pending -= 1;
             }
 
             // then check if there is any results from the threadpool
-            if let Ok((thread_id, callback_id, data)) = self.threadp_reciever.try_recv() {
-                let cb = self.callback_queue.remove(&callback_id).unwrap();
-                cb(data);
-                self.refs -= 1;
+            while let Ok((thread_id, callback_id, data)) = self.threadp_reciever.try_recv() {
+                self.next_tick_callbacks.push((callback_id, data));
                 self.available.push(thread_id);
             }
+
+             // ===== CHECK =====
+             // a set immidiate function could be added pretty easily but we won't do that here
+
+             // ===== CLOSE CALLBACKS ======
+             // Release resources, we won't do that here, it's just another "hook" for our "extensions"
+             // to use. We release in every callback instead
 
             // Let the OS have a time slice of our thread so we don't busy loop
             thread::sleep(std::time::Duration::from_millis(1));
@@ -316,18 +363,18 @@ impl Runtime {
     fn register_io(&mut self, mut event: minimio::Event, cb: impl FnOnce(Js) + 'static) {
         let cb_id = self.add_callback(cb) as i64;
 
-        // if no ident is set, set it equal to cb_id + 1 000 000 
+        // if no ident is set, set it equal to cb_id + 1 000 000
         if event.ident == 0 {
             event.ident = cb_id as u64 + 1_000_000;
         }
-        p(format!("Event with id: {} registered.",event.ident));
+        p(format!("Event with id: {} registered.", event.ident));
         self.epoll_event_cb_map
             .insert(event.ident as i64, cb_id as usize);
 
         minimio::add_event(self.epoll_queue, &[event.clone()], 0)
             .expect("Error adding event to queue.");
 
-        self.refs += 1;
+        self.pending_events += 1;
         self.epoll_pending += 1;
         self.epoll_starter
             .send(self.epoll_pending)
@@ -351,8 +398,22 @@ impl Runtime {
         // we are not going to implement a real scheduler here, just a LIFO queue
         let available = self.schedule();
         self.thread_pool[available].sender.send(event).unwrap();
-        self.refs += 1;
+        self.pending_events += 1;
     }
+
+    fn set_timeout(&mut self, ms: u64, cb: impl Fn(Js) + 'static) {
+        // Is it theoretically possible to get two equal instants? If so we will have a bug...
+        let now = Instant::now();
+        let cb_id = self.add_callback(cb);
+        let timeout = now + Duration::from_millis(ms);
+        self.timers.insert(timeout, cb_id);
+        self.pending_events += 1;
+    }
+}
+
+fn set_timeout(ms: u64, cb: impl Fn(Js) + 'static) {
+    let rt = unsafe { &mut *(RUNTIME as *mut Runtime) };
+    rt.set_timeout(ms, cb);
 }
 
 // ===== THIS IS PLUGINS CREATED IN C++ FOR THE NODE RUNTIME OR PART OF THE RUNTIME ITSELF =====
@@ -361,7 +422,6 @@ impl Runtime {
 // as a reference to our startup function.
 
 struct Crypto;
-
 impl Crypto {
     fn encrypt(n: usize, cb: impl Fn(Js) + 'static + Clone) {
         let work = move || {
@@ -438,6 +498,13 @@ impl Io {
 
         let wrapped = move |_n| {
             let mut stream = stream;
+            // we do this to prevent getting an error if the status somehow changes between the epoll
+            // and our read. In a real implementation this should be handled by re-register the event
+            // to the epoll queue for example or just accept that there might be a very small amount
+            // of blocking happening here (it might even be more costly to re-register the task)
+            stream
+                .set_nonblocking(false)
+                .expect("Error setting stream to blocking.");
             let mut buffer = String::new();
             stream
                 .read_to_string(&mut buffer)
@@ -478,7 +545,9 @@ impl Io {
             // and our read. In a real implementation this should be handled by re-register the event
             // to the epoll queue for example or just accept that there might be a very small amount
             // of blocking happening here (it might even be more costly to re-register the task)
-            stream.set_nonblocking(false).expect("Error setting stream to blocking.");
+            stream
+                .set_nonblocking(false)
+                .expect("Error setting stream to blocking.");
             stream
                 .read_to_string(&mut buffer)
                 .expect("Error reading from stream.");
@@ -489,155 +558,5 @@ impl Io {
 
         let rt: &mut Runtime = unsafe { &mut *(RUNTIME as *mut Runtime) };
         rt.register_io(event, wrapped);
-    }
-}
-
-/// As you'll see the system calls for interacting with Epoll, Kqueue and IOCP is highly
-/// platform specific. The Rust community has already abstracted this away in the `mio` crate
-/// but since we want to see what really goes on under the hood we implement a sort of mini-mio
-/// library ourselves.
-mod minimio {
-    use super::*;
-    pub fn queue() -> io::Result<i32> {
-        if cfg!(target_os = "macos") {
-            macos::kqueue()
-        } else {
-            unimplemented!()
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    pub type Event = macos::ffi::Kevent;
-
-    pub fn poll(
-        queue: i32,
-        changelist: &mut [Event],
-        timeout: usize,
-        max_events: Option<i32>,
-    ) -> io::Result<usize> {
-        if cfg!(target_os = "macos") {
-            macos::kevent(queue, &[], changelist, timeout)
-        } else {
-            unimplemented!()
-        }
-    }
-
-    /// Timeout of 0 means no timeout
-    pub fn add_event(queue: i32, event_list: &[Event], timeout_ms: usize) -> io::Result<usize> {
-        if cfg!(target_os = "macos") {
-            macos::kevent(queue, event_list, &mut [], timeout_ms)
-        } else {
-            unimplemented!()
-        }
-    }
-
-    pub fn event_timeout(timeout_ms: i64) -> Event {
-        if cfg!(target_os = "macos") {
-            Event {
-                ident: 0,
-                filter: unsafe { macos::EVFILT_TIMER },
-                flags: unsafe { macos::EV_ADD | macos::EV_ENABLE | macos::EV_ONESHOT },
-                fflags: 0,
-                data: timeout_ms,
-                udata: 0,
-            }
-        } else {
-            unimplemented!()
-        }
-    }
-
-    pub fn event_read(fd: RawFd) -> Event {
-        if cfg!(target_os = "macos") {
-            Event {
-                ident: fd as u64,
-                filter: macos::EVFILT_READ,
-                flags: macos::EV_ADD | macos::EV_ENABLE | macos::EV_ONESHOT,
-                fflags: 0,
-                data: 0,
-                udata: 0,
-            }
-        } else {
-            unimplemented!()
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    mod macos {
-        use super::*;
-        use ffi::*;
-
-        // Shamelessly stolen from the libc wrapper found at:
-        // https://github.com/rust-lang/libc/blob/c8aa8ec72d631bc35099bcf5d634cf0a0b841be0/src/unix/bsd/apple/mod.rs#L2447
-        pub const EVFILT_TIMER: i16 = -7;
-        pub const EVFILT_READ: i16 = -1;
-        pub const EV_ADD: u16 = 0x1;
-        pub const EV_ENABLE: u16 = 0x4;
-        pub const EV_ONESHOT: u16 = 0x10;
-
-        pub mod ffi {
-            #[derive(Debug, Clone, Default)]
-            #[repr(C)]
-            // https://github.com/rust-lang/libc/blob/c8aa8ec72d631bc35099bcf5d634cf0a0b841be0/src/unix/bsd/apple/mod.rs#L497
-            // https://github.com/rust-lang/libc/blob/c8aa8ec72d631bc35099bcf5d634cf0a0b841be0/src/unix/bsd/apple/mod.rs#L207
-            pub struct Kevent {
-                pub ident: u64,
-                pub filter: i16,
-                pub flags: u16,
-                pub fflags: u32,
-                pub data: i64,
-                pub udata: u64,
-            }
-            #[link(name = "c")]
-            extern "C" {
-                /// Returns: positive: file descriptor, negative: error
-                pub(super) fn kqueue() -> i32;
-                /// Returns: nothing, all non zero return values is an error
-                pub(super) fn kevent(
-                    kq: i32,
-                    changelist: *const Kevent,
-                    nchanges: i32,
-                    eventlist: *mut Kevent,
-                    nevents: i32,
-                    timeout: usize,
-                ) -> i32;
-            }
-        }
-        pub fn timeout_event(timer: i64) -> ffi::Kevent {
-            ffi::Kevent {
-                ident: 1,
-                filter: EVFILT_TIMER,
-                flags: EV_ADD | EV_ENABLE | EV_ONESHOT,
-                fflags: 0,
-                data: timer,
-                udata: 0,
-            }
-        }
-
-        pub fn kqueue() -> io::Result<i32> {
-            let fd = unsafe { ffi::kqueue() };
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(fd)
-        }
-
-        pub fn kevent(
-            kq: RawFd,
-            cl: &[Kevent],
-            el: &mut [Kevent],
-            timeout: usize,
-        ) -> io::Result<usize> {
-            let res = unsafe {
-                let kq = kq as i32;
-                let cl_len = cl.len() as i32;
-                let el_len = el.len() as i32;
-                ffi::kevent(kq, cl.as_ptr(), cl_len, el.as_mut_ptr(), el_len, timeout)
-            };
-            if res < 0 {
-                return Err(io::Error::last_os_error());
-            }
-
-            Ok(res as usize)
-        }
     }
 }
