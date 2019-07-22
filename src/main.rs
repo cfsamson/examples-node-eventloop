@@ -1,65 +1,68 @@
 /// Think of this function as the javascript program you have written
 fn javascript() {
-    println!("Thread: {}. First call to read test.txt", current());
+    p("First call to read test.txt");
     Fs::read("test.txt", |result| {
         let text = result.into_string().unwrap();
         let len = text.len();
-        println!("Thread: {}. First count: {} characters.", current(), len);
+        p(format!("First count: {} characters.", len));
 
-        println!("Thread: {}. I want to encrypt something.", current());
+        p("I want to encrypt something.");
         Crypto::encrypt(text.len(), |result| {
             let n = result.into_int().unwrap();
-            println!("Thread: {}. \"Encrypted\" number is: {}", current(), n);
+            p(format!("\"Encrypted\" number is: {}", n));
         })
     });
 
-    println!("Thread: {}. Registering immediate timeout 1", current());
+    p("Registering immediate timeout 1");
     Io::timeout(0, |_res| {
-        println!("Thread: {}. Immediate1 timed out", current());
+        p("Immediate1 timed out");
     });
-    println!("Thread: {}. Registering immediate timeout 2", current());
+    p("Registering immediate timeout 2");
     Io::timeout(0, |_res| {
-        println!("Thread: {}. Immediate2 timed out", current());
+        p("Immediate2 timed out");
     });
-    println!("Thread: {}. Registering immediate timeout 3", current());
+    p("Registering immediate timeout 3");
     Io::timeout(0, |_res| {
-        println!("Thread: {}. Immediate3 timed out", current());
+        p("Immediate3 timed out");
     });
 
     // let's read the file again and display the text
-    println!("Thread: {}. Second call to read test.txt", current());
+    p("Second call to read test.txt");
     Fs::read("test.txt", |result| {
         let text = result.into_string().unwrap();
         let len = text.len();
-        println!("Thread: {}. Second count: {} characters.", current(), len);
+        p(format!("Second count: {} characters.", len));
 
         // aaand one more time but not in parallell.
-        println!("Thread: {}. Third call to read test.txt", current());
+        p("Third call to read test.txt");
         Fs::read("test.txt", |result| {
             let text = result.into_string().unwrap();
-            println!(
-                "Thread: {}. The file contains the following text:\n\n\"{}\"\n",
-                current(),
-                text
-            );
+            p_content(&text, "file read");
         });
     });
 
-    println!("Thread: {}. Registering a 3000 ms timeout", current());
-    Io::timeout(3000, |_res| {
-        println!("Thread: {}. 3000ms timer timed out", current());
-        Io::timeout(1500, |_res| {
-            println!("Thread: {}. 1500ms timer(nested) timed out", current());
+    p("Registering a 3000 ms timeout");
+    Io::timeout(1000, |_res| {
+        p("3000ms timer timed out");
+        Io::timeout(500, |_res| {
+            p("1500ms timer(nested) timed out");
         });
     });
 
-    println!("Thread: {}. Registering http get request to google.com", current());
-    Io::http_get_slow("http//www.google.com", 5000, |result| {
+    p("Registering http get request to google.com");
+    Io::http_get_slow("http//www.google.com", 2000, |result| {
         let result = result.into_string().unwrap();
-        println!("\n===== START WEB RESPONSE =====");
-        println!("{}", result);
-        println!("===== END WEB RESPONSE =====");
+        p_content(result.trim(), "web call");
     });
+}
+fn p(t: impl std::fmt::Display) {
+    println!("Thread: {}\t {}", current(), t);
+}
+
+fn p_content(t: impl std::fmt::Display, decr: &str) {
+        println!("\n===== THREAD {} START CONTENT - {} =====", current(), decr.to_uppercase());
+        println!("{}", t);
+        println!("===== END CONTENT =====\n");
 }
 
 fn current() -> String {
@@ -162,17 +165,9 @@ impl Runtime {
                 .name(format!("pool{}", i))
                 .spawn(move || {
                     while let Ok(event) = evt_reciever.recv() {
-                        println!(
-                            "Thread {}, recived a task of type: {}",
-                            current(),
-                            event.kind,
-                        );
+                        p(format!("recived a task of type: {}", event.kind));
                         let res = (event.task)();
-                        println!(
-                            "Thread {}, finished running a task of type: {}.",
-                            current(),
-                            event.kind
-                        );
+                        p(format!("finished running a task of type: {}.",event.kind));
                         threadp_sender.send((i, event.callback_id, res)).unwrap();
                     }
                 })
@@ -212,11 +207,7 @@ impl Runtime {
                         Ok(v) if v > 0 => {
                             for i in 0..v {
                                 let event = changes.get_mut(i).expect("No events in event list.");
-                                println!(
-                                    "Thread {}: epoll event {} is ready",
-                                    current(),
-                                    event.ident
-                                );
+                                p(format!("epoll event {} is ready",event.ident));
                                 epoll_sender.send(event.ident as usize).unwrap();
                             }
                         }
@@ -280,7 +271,7 @@ impl Runtime {
             // Let the OS have a time slice of our thread so we don't busy loop
             thread::sleep(std::time::Duration::from_millis(1));
         }
-        println!("FINISHED");
+        p("FINISHED");
     }
 
     fn schedule(&mut self) -> usize {
@@ -329,11 +320,7 @@ impl Runtime {
         if event.ident == 0 {
             event.ident = cb_id as u64 + 1_000_000;
         }
-        println!(
-            "Thread {}: Event with id: {} registered.",
-            current(),
-            event.ident
-        );
+        p(format!("Event with id: {} registered.",event.ident));
         self.epoll_event_cb_map
             .insert(event.ident as i64, cb_id as usize);
 
