@@ -14,15 +14,15 @@ fn javascript() {
     });
 
     p("Registering immediate timeout 1");
-    Io::timeout(0, |_res| {
+    set_timeout(0, |_res| {
         p("Immediate1 timed out");
     });
     p("Registering immediate timeout 2");
-    Io::timeout(0, |_res| {
+    set_timeout(0, |_res| {
         p("Immediate2 timed out");
     });
     p("Registering immediate timeout 3");
-    Io::timeout(0, |_res| {
+    set_timeout(0, |_res| {
         p("Immediate3 timed out");
     });
 
@@ -94,7 +94,6 @@ use std::time::{Instant, Duration};
 
 mod minimio;
 
-const MAX_EPOLL_EVENTS: usize = 1024;
 static mut RUNTIME: usize = 0;
 
 type Callback = Box<FnOnce(Js)>;
@@ -256,18 +255,16 @@ impl Runtime {
 
         let mut timers_to_remove = vec![]; // avoid allocating on every loop
         let  mut ticks = 0; // just for us priting out
+
         // First we run our "main" function
         f();
 
         
 
-        // The we check that we we still have outstanding tasks in the pipeline
+        // ===== EVENT LOOP =====
         while self.pending_events > 0 {
             ticks += 1;
-            if !self.next_tick_callbacks.is_empty() {
-                p(format!("===== TICK {} =====", ticks));
-            }
-
+            
             // ===== TIMERS =====
             self.timers
             .range(..=Instant::now())
@@ -276,6 +273,12 @@ impl Runtime {
             while let Some(key) = timers_to_remove.pop() {
                 let callback_id = self.timers.remove(&key).unwrap();
                 self.next_tick_callbacks.push((callback_id, Js::Undefined));
+            }
+
+            // NOT PART OF LOOP, JUST FOR US TO SEE WHAT TICK IS EXCECUTING
+            
+            if !self.next_tick_callbacks.is_empty() {
+                p(format!("===== TICK {} =====", ticks));
             }
 
             // ===== CALLBACKS =====
@@ -316,7 +319,8 @@ impl Runtime {
              // to use. We release in every callback instead
 
             // Let the OS have a time slice of our thread so we don't busy loop
-            thread::sleep(std::time::Duration::from_millis(1));
+            // this could be dynamically set depending on requirements or load.
+            thread::park_timeout(std::time::Duration::from_millis(1));
         }
         p("FINISHED");
     }
@@ -467,13 +471,6 @@ use std::os::unix::io::{AsRawFd, RawFd};
 
 struct Io;
 impl Io {
-    pub fn timeout(ms: u32, cb: impl Fn(Js) + 'static) {
-        let event = minimio::event_timeout(i64::from(ms));
-
-        let rt: &mut Runtime = unsafe { &mut *(RUNTIME as *mut Runtime) };
-        rt.register_io(event, cb);
-    }
-
     pub fn http_get_slow(url: &str, delay_ms: u32, cb: impl Fn(Js) + 'static + Clone) {
         // Don't worry, http://slowwly.robertomurray.co.uk is a site for simulating a delayed
         // response from a server. Perfect for our use case.

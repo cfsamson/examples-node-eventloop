@@ -36,21 +36,6 @@ pub fn add_event(queue: i32, event_list: &[Event], timeout_ms: usize) -> io::Res
     }
 }
 
-pub fn event_timeout(timeout_ms: i64) -> Event {
-    if cfg!(target_os = "macos") {
-        Event {
-            ident: 0,
-            filter: unsafe { macos::EVFILT_TIMER },
-            flags: unsafe { macos::EV_ADD | macos::EV_ENABLE | macos::EV_ONESHOT },
-            fflags: 0,
-            data: timeout_ms,
-            udata: 0,
-        }
-    } else {
-        unimplemented!()
-    }
-}
-
 pub fn event_read(fd: RawFd) -> Event {
     if cfg!(target_os = "macos") {
         Event {
@@ -107,16 +92,7 @@ mod macos {
             ) -> i32;
         }
     }
-    pub fn timeout_event(timer: i64) -> ffi::Kevent {
-        ffi::Kevent {
-            ident: 1,
-            filter: EVFILT_TIMER,
-            flags: EV_ADD | EV_ENABLE | EV_ONESHOT,
-            fflags: 0,
-            data: timer,
-            udata: 0,
-        }
-    }
+
 
     pub fn kqueue() -> io::Result<i32> {
         let fd = unsafe { ffi::kqueue() };
