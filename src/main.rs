@@ -13,6 +13,19 @@ fn javascript() {
         })
     });
 
+    println!("Thread: {}. Registering immediate timeout 1", current());
+    Io::timeout(0, |_res| {
+        println!("Thread: {}. Immediate1 timed out", current());
+    });
+    println!("Thread: {}. Registering immediate timeout 2", current());
+    Io::timeout(0, |_res| {
+        println!("Thread: {}. Immediate2 timed out", current());
+    });
+    println!("Thread: {}. Registering immediate timeout 3", current());
+    Io::timeout(0, |_res| {
+        println!("Thread: {}. Immediate3 timed out", current());
+    });
+
     // let's read the file again and display the text
     println!("Thread: {}. Second call to read test.txt", current());
     Fs::read("test.txt", |result| {
@@ -32,28 +45,15 @@ fn javascript() {
         });
     });
 
+    println!("Thread: {}. Registering a 3000 ms timeout", current());
     Io::timeout(3000, |_res| {
-        println!("Thread: {}.Timer1 timed out", current());
+        println!("Thread: {}. 3000ms timer timed out", current());
         Io::timeout(1500, |_res| {
-            println!("Thread: {}. Timer3(nested) timed out", current());
+            println!("Thread: {}. 1500ms timer(nested) timed out", current());
         });
     });
 
-    Io::timeout(3000, |_res| {
-        println!("Thread: {}.Timer1 timed out", current());
-        Io::timeout(1500, |_res| {
-            println!("Thread: {}. Timer3(nested) timed out", current());
-        });
-    });
-
-    Io::timeout(3000, |_res| {
-        println!("Thread: {}.Timer1 timed out", current());
-        Io::timeout(1500, |_res| {
-            println!("Thread: {}. Timer3(nested) timed out", current());
-        });
-    });
-
-
+    println!("Thread: {}. Registering http get request to google.com", current());
     Io::http_get_slow("http//www.google.com", 5000, |result| {
         let result = result.into_string().unwrap();
         println!("\n===== START WEB RESPONSE =====");
@@ -164,13 +164,13 @@ impl Runtime {
                     while let Ok(event) = evt_reciever.recv() {
                         println!(
                             "Thread {}, recived a task of type: {}",
-                            thread::current().name().unwrap(),
+                            current(),
                             event.kind,
                         );
                         let res = (event.task)();
                         println!(
                             "Thread {}, finished running a task of type: {}.",
-                            thread::current().name().unwrap(),
+                            current(),
                             event.kind
                         );
                         threadp_sender.send((i, event.callback_id, res)).unwrap();
@@ -194,15 +194,20 @@ impl Runtime {
         thread::Builder::new()
             .name("epoll".to_string())
             .spawn(move || loop {
-                let mut changes: Vec<minimio::Event> = (0..MAX_EPOLL_EVENTS)
-                .map(|_| minimio::Event::default())
-                .collect();
+                // let mut changes: Vec<minimio::Event> = (0..MAX_EPOLL_EVENTS)
+                // .map(|_| minimio::Event::default())
+                // .collect();
 
+                let mut changes = vec![];
                 while let Ok(current_event_count) = epoll_start_reciever.recv() {
-                    // if changes.len() < current_event_count {
-                    //     let missing = current_event_count - changes.len();
-                    //     (0..missing).for_each(|_| changes.push(minimio::Event::default()));
-                    // }
+                    // We increase the size to hold the current number of events but
+                    // it will always grow to the largest load and stay there. We could implement
+                    // a resize strategy to not hold on to more memory than we need but won't do
+                    // that here
+                    if changes.len() < current_event_count {
+                        let missing = current_event_count - changes.len();
+                        (0..missing).for_each(|_| changes.push(minimio::Event::default()));
+                    }
                     match minimio::poll(queue, changes.as_mut_slice(), 0, None) {
                         Ok(v) if v > 0 => {
                             for i in 0..v {
@@ -213,7 +218,6 @@ impl Runtime {
                                     event.ident
                                 );
                                 epoll_sender.send(event.ident as usize).unwrap();
-                                //*event = minimio::Event::default();
                             }
                         }
                         Err(e) => panic!("{:?}", e),
@@ -483,6 +487,11 @@ impl Io {
         let wrapped = move |_n| {
             let mut stream = stream;
             let mut buffer = String::new();
+            // we do this to prevent getting an error if the status somehow changes between the epoll
+            // and our read. In a real implementation this should be handled by re-register the event
+            // to the epoll queue for example or just accept that there might be a very small amount
+            // of blocking happening here (it might even be more costly to re-register the task)
+            stream.set_nonblocking(false).expect("Error setting stream to blocking.");
             stream
                 .read_to_string(&mut buffer)
                 .expect("Error reading from stream.");
@@ -544,7 +553,6 @@ mod minimio {
                 fflags: 0,
                 data: timeout_ms,
                 udata: 0,
-                ext: [0, 0],
             }
         } else {
             unimplemented!()
@@ -560,7 +568,6 @@ mod minimio {
                 fflags: 0,
                 data: 0,
                 udata: 0,
-                ext: [0, 0],
             }
         } else {
             unimplemented!()
@@ -592,7 +599,6 @@ mod minimio {
                 pub fflags: u32,
                 pub data: i64,
                 pub udata: u64,
-                pub ext: [u64; 2],
             }
             #[link(name = "c")]
             extern "C" {
@@ -617,7 +623,6 @@ mod minimio {
                 fflags: 0,
                 data: timer,
                 udata: 0,
-                ext: [0, 0],
             }
         }
 
