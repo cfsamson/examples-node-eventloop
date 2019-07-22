@@ -60,9 +60,13 @@ fn p(t: impl std::fmt::Display) {
 }
 
 fn p_content(t: impl std::fmt::Display, decr: &str) {
-        println!("\n===== THREAD {} START CONTENT - {} =====", current(), decr.to_uppercase());
-        println!("{}", t);
-        println!("===== END CONTENT =====\n");
+    println!(
+        "\n===== THREAD {} START CONTENT - {} =====",
+        current(),
+        decr.to_uppercase()
+    );
+    println!("{}", t);
+    println!("===== END CONTENT =====\n");
 }
 
 fn current() -> String {
@@ -77,12 +81,10 @@ fn main() {
 // ===== THIS IS OUR "NODE LIBRARY" =====
 use std::collections::HashMap;
 use std::fmt;
-use std::fs;
 use std::io::{self, Read, Write};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-const MAX_EPOLL_EVENTS: usize  = 1024;
 static mut RUNTIME: usize = 0;
 
 type Callback = Box<FnOnce(Js)>;
@@ -167,7 +169,7 @@ impl Runtime {
                     while let Ok(event) = evt_reciever.recv() {
                         p(format!("recived a task of type: {}", event.kind));
                         let res = (event.task)();
-                        p(format!("finished running a task of type: {}.",event.kind));
+                        p(format!("finished running a task of type: {}.", event.kind));
                         threadp_sender.send((i, event.callback_id, res)).unwrap();
                     }
                 })
@@ -207,7 +209,7 @@ impl Runtime {
                         Ok(v) if v > 0 => {
                             for i in 0..v {
                                 let event = changes.get_mut(i).expect("No events in event list.");
-                                p(format!("epoll event {} is ready",event.ident));
+                                p(format!("epoll event {} is ready", event.ident));
                                 epoll_sender.send(event.ident as usize).unwrap();
                             }
                         }
@@ -245,7 +247,7 @@ impl Runtime {
         while self.refs > 0 {
             // Check if we have any timer events that have expired
 
-            // First poll any epoll/kqueue
+            // First poll any epoll/kqueue ready events
             if let Ok(event_id) = self.epoll_reciever.try_recv() {
                 let id = self
                     .epoll_event_cb_map
@@ -277,7 +279,7 @@ impl Runtime {
     fn schedule(&mut self) -> usize {
         match self.available.pop() {
             Some(thread_id) => thread_id,
-            // We would normally queue this
+            // We would normally queue this, and schedule as soon as a thread is available
             None => panic!("Out of threads."),
         }
     }
@@ -289,15 +291,17 @@ impl Runtime {
     }
 
     /// Adds a callback to the queue and returns the key
-    fn add_callback(&mut self, cb: impl FnOnce(Js) + 'static) -> usize {
-        // this is the happy path
+    fn add_callback<CB>(&mut self, cb: CB) -> usize
+    where
+        CB: FnOnce(Js) + 'static,
+    {
         let ident = self.generate_identity();
         let boxed_cb = Box::new(cb);
         let taken = self.callback_queue.contains_key(&ident);
 
         // if there is a collision or the identity is already there we loop until we find a new one
         // we don't cover the case where there are `usize::MAX` number of callbacks waiting since
-        // that if we're fast and queue a new event every nanosecond that will still take 585.5 years
+        // that, if we're fast and queue a new event every nanosecond, will still take 585.5 years
         // to do on a 64 bit system.
         if !taken {
             self.callback_queue.insert(ident, boxed_cb);
@@ -313,14 +317,17 @@ impl Runtime {
         }
     }
 
-    fn register_io(&mut self, mut event: minimio::Event, cb: impl FnOnce(Js) + 'static) {
+    fn register_io<CB>(&mut self, mut event: minimio::Event, cb: CB)
+    where
+        CB: FnOnce(Js) + 'static,
+    {
         let cb_id = self.add_callback(cb) as i64;
 
-        // if no ident is set, set it equal to cb_id + 1 000 000 
+        // if no ident is set, set it equal to cb_id + 1 000 000
         if event.ident == 0 {
             event.ident = cb_id as u64 + 1_000_000;
         }
-        p(format!("Event with id: {} registered.",event.ident));
+        p(format!("Event with id: {} registered.", event.ident));
         self.epoll_event_cb_map
             .insert(event.ident as i64, cb_id as usize);
 
@@ -334,14 +341,12 @@ impl Runtime {
             .expect("Sending to epoll_starter.");
     }
 
-    fn register_work(
-        &mut self,
-        task: impl Fn() -> Js + Send + 'static,
-        kind: EventKind,
-        cb: impl FnOnce(Js) + 'static,
-    ) {
+    fn register_work<T, CB>(&mut self, task: T, kind: EventKind, cb: CB)
+    where
+        T: Fn() -> Js + Send + 'static,
+        CB: FnOnce(Js) + 'static,
+    {
         let callback_id = self.add_callback(cb);
-
         let event = Event {
             task: Box::new(task),
             callback_id,
@@ -359,11 +364,14 @@ impl Runtime {
 // The pointer dereferencing of our runtime is not striclty needed but is mostly for trying to
 // emulate a bit of the same feeling as when you use modules in javascript. We could pass the runtime in
 // as a reference to our startup function.
-
+use std::fs::File;
 struct Crypto;
 
 impl Crypto {
-    fn encrypt(n: usize, cb: impl Fn(Js) + 'static + Clone) {
+    fn encrypt<CB>(n: usize, cb: CB)
+    where
+        CB: Fn(Js) + 'static + Clone,
+    {
         let work = move || {
             fn fibonacchi(n: usize) -> usize {
                 match n {
@@ -372,9 +380,7 @@ impl Crypto {
                     _ => fibonacchi(n - 1) + fibonacchi(n - 2),
                 }
             }
-
-            let fib = fibonacchi(n);
-            Js::Int(fib)
+            Js::Int(fibonacchi(n))
         };
 
         let rt = unsafe { &mut *(RUNTIME as *mut Runtime) };
@@ -384,13 +390,15 @@ impl Crypto {
 
 struct Fs;
 impl Fs {
-    fn read(path: &'static str, cb: impl Fn(Js) + 'static) {
+    fn read<CB>(path: &'static str, cb: CB)
+    where
+        CB: Fn(Js) + 'static,
+    {
+        // Let's simulate that there is a very large file we're reading...
         let work = move || {
-            // Let's simulate that there is a very large file we're reading allowing us to actually
-            // observe how the code is executed
             thread::sleep(std::time::Duration::from_secs(2));
             let mut buffer = String::new();
-            fs::File::open(&path)
+            File::open(&path)
                 .unwrap()
                 .read_to_string(&mut buffer)
                 .unwrap();
@@ -409,12 +417,14 @@ struct Io;
 impl Io {
     pub fn timeout(ms: u32, cb: impl Fn(Js) + 'static) {
         let event = minimio::event_timeout(i64::from(ms));
-
-        let rt: &mut Runtime = unsafe { &mut *(RUNTIME as *mut Runtime) };
+        let rt = unsafe { &mut *(RUNTIME as *mut Runtime) };
         rt.register_io(event, cb);
     }
 
-    pub fn http_get_slow(url: &str, delay_ms: u32, cb: impl Fn(Js) + 'static + Clone) {
+    pub fn http_get_slow<CB>(url: &str, delay_ms: u32, cb: CB)
+    where
+        CB: Fn(Js) + 'static + Clone,
+    {
         // Don't worry, http://slowwly.robertomurray.co.uk is a site for simulating a delayed
         // response from a server. Perfect for our use case.
         let mut stream: TcpStream = TcpStream::connect("slowwly.robertomurray.co.uk:80").unwrap();
@@ -428,62 +438,20 @@ impl Io {
 
         stream
             .write_all(request.as_bytes())
-            .expect("Error writing to stream");
+            .expect("Writing to stream");
         stream
             .set_nonblocking(true)
-            .expect("set_nonblocking call failed");
-        let fd = stream.as_raw_fd();
+            .expect("set_nonblocking failed");
 
+        let fd = stream.as_raw_fd();
         let event = minimio::event_read(fd);
 
         let wrapped = move |_n| {
-            let mut stream = stream;
+            let mut stream = stream; // can change it to blocking here to prevent some edge cases
             let mut buffer = String::new();
             stream
                 .read_to_string(&mut buffer)
                 .expect("Error reading from stream.");
-            cb(Js::String(buffer));
-        };
-
-        let rt: &mut Runtime = unsafe { &mut *(RUNTIME as *mut Runtime) };
-        rt.register_io(event, wrapped);
-    }
-    /// URl is in www.google.com format, i.e. only the host name, we can't
-    /// request paths at this point
-    pub fn http_get(url: &str, cb: impl Fn(Js) + 'static + Clone) {
-        let url_port = format!("{}:80", url);
-        let mut stream: TcpStream = TcpStream::connect(&url_port).unwrap();
-        let request = format!(
-            "GET / HTTP/1.1\r\n\
-             Host: {}\r\n\
-             Connection: close\r\n\
-             \r\n",
-            url
-        );
-
-        stream
-            .write_all(request.as_bytes())
-            .expect("Error writing to stream");
-        stream
-            .set_nonblocking(true)
-            .expect("set_nonblocking call failed");
-        let fd = stream.as_raw_fd();
-
-        let event = minimio::event_read(fd);
-
-        let wrapped = move |_n| {
-            let mut stream = stream;
-            let mut buffer = String::new();
-            // we do this to prevent getting an error if the status somehow changes between the epoll
-            // and our read. In a real implementation this should be handled by re-register the event
-            // to the epoll queue for example or just accept that there might be a very small amount
-            // of blocking happening here (it might even be more costly to re-register the task)
-            stream.set_nonblocking(false).expect("Error setting stream to blocking.");
-            stream
-                .read_to_string(&mut buffer)
-                .expect("Error reading from stream.");
-            // The way we do this we know it's a redirect so we grab the location header and
-            // get that webpage instead
             cb(Js::String(buffer));
         };
 
@@ -535,8 +503,8 @@ mod minimio {
         if cfg!(target_os = "macos") {
             Event {
                 ident: 0,
-                filter: unsafe { macos::EVFILT_TIMER },
-                flags: unsafe { macos::EV_ADD | macos::EV_ENABLE | macos::EV_ONESHOT },
+                filter: macos::EVFILT_TIMER,
+                flags: macos::EV_ADD | macos::EV_ENABLE | macos::EV_ONESHOT,
                 fflags: 0,
                 data: timeout_ms,
                 udata: 0,
@@ -602,16 +570,6 @@ mod minimio {
                 ) -> i32;
             }
         }
-        pub fn timeout_event(timer: i64) -> ffi::Kevent {
-            ffi::Kevent {
-                ident: 1,
-                filter: EVFILT_TIMER,
-                flags: EV_ADD | EV_ENABLE | EV_ONESHOT,
-                fflags: 0,
-                data: timer,
-                udata: 0,
-            }
-        }
 
         pub fn kqueue() -> io::Result<i32> {
             let fd = unsafe { ffi::kqueue() };
@@ -627,10 +585,10 @@ mod minimio {
             el: &mut [Kevent],
             timeout: usize,
         ) -> io::Result<usize> {
+            let kq = kq as i32;
+            let cl_len = cl.len() as i32;
+            let el_len = el.len() as i32;
             let res = unsafe {
-                let kq = kq as i32;
-                let cl_len = cl.len() as i32;
-                let el_len = el.len() as i32;
                 ffi::kevent(kq, cl.as_ptr(), cl_len, el.as_mut_ptr(), el_len, timeout)
             };
             if res < 0 {
