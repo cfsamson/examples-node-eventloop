@@ -1,89 +1,14 @@
-/// Think of this function as the javascript program you have written
-fn javascript() {
-    print("First call to read test.txt");
-    Fs::read("test.txt", |result| {
-        let text = result.into_string().unwrap();
-        let len = text.len();
-        print(format!("First count: {} characters.", len));
-
-        print("I want to encrypt something.");
-        Crypto::encrypt(text.len(), |result| {
-            let n = result.into_int().unwrap();
-            print(format!("\"Encrypted\" number is: {}", n));
-        })
-    });
-
-    print("Registering immediate timeout 1");
-    set_timeout(0, |_res| {
-        print("Immediate1 timed out");
-    });
-    print("Registering immediate timeout 2");
-    set_timeout(0, |_res| {
-        print("Immediate2 timed out");
-    });
-    print("Registering immediate timeout 3");
-    set_timeout(0, |_res| {
-        print("Immediate3 timed out");
-    });
-
-    // let's read the file again and display the text
-    print("Second call to read test.txt");
-    Fs::read("test.txt", |result| {
-        let text = result.into_string().unwrap();
-        let len = text.len();
-        print(format!("Second count: {} characters.", len));
-
-        // aaand one more time but not in parallell.
-        print("Third call to read test.txt");
-        Fs::read("test.txt", |result| {
-            let text = result.into_string().unwrap();
-            print_content(&text, "file read");
-        });
-    });
-
-    print("Registering a 3000 ms timeout");
-    set_timeout(3000, |_res| {
-        print("3000ms timer timed out");
-        set_timeout(500, |_res| {
-            print("500ms timer(nested) timed out");
-        });
-    });
-
-    print("Registering a 1000 ms timeout");
-    set_timeout(1000, |_res| {
-        print("SETTIMEOUT");
-    });
-
-    print("Registering http get request to google.com");
-    Io::http_get_slow("http//www.google.com", 2000, |result| {
-        let result = result.into_string().unwrap();
-        print_content(result.trim(), "web call");
-    });
-}
-fn print(t: impl std::fmt::Display) {
-    println!("Thread: {}\t {}", current(), t);
-}
-
-fn print_content(t: impl std::fmt::Display, decr: &str) {
-    println!(
-        "\n===== THREAD {} START CONTENT - {} =====",
-        current(),
-        decr.to_uppercase()
-    );
-    println!("{}", t);
-    println!("===== END CONTENT =====\n");
-}
-
-fn current() -> String {
-    thread::current().name().unwrap().to_string()
-}
-
-fn main() {
-    let mut rt = Runtime::new();
-    rt.run(javascript);
-}
-
-// ===== THIS IS OUR "NODE LIBRARY" =====
+//! ===== THIS IS OUR "NODE LIBRARY" =====
+//! You'll use this library like this
+//! ```rust
+//! # extern crate js_event_loop;
+//! use js_event_loop::Runtime;
+//! fn main() {
+//!    let mut rt = Runtime::new();
+//!    rt.run(|| {
+//!        println!("Hello world!");
+//!    });
+//! }
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
@@ -93,8 +18,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 mod minimio;
+pub mod modules;
 
-static mut RUNTIME: usize = 0;
+pub static mut RUNTIME: usize = 0;
 
 struct Event {
     task: Box<Fn() -> Js + Send + 'static>,
@@ -126,7 +52,7 @@ pub enum Js {
 
 impl Js {
     /// Convenience method since we know the types
-    fn into_string(self) -> Option<String> {
+    pub fn into_string(self) -> Option<String> {
         match self {
             Js::String(s) => Some(s),
             _ => None,
@@ -134,7 +60,7 @@ impl Js {
     }
 
     /// Convenience method since we know the types
-    fn into_int(self) -> Option<usize> {
+    pub fn into_int(self) -> Option<usize> {
         match self {
             Js::Int(n) => Some(n),
             _ => None,
@@ -176,9 +102,7 @@ impl Runtime {
                 .name(format!("pool{}", i))
                 .spawn(move || {
                     while let Ok(event) = evt_reciever.recv() {
-                        print(format!("recived a task of type: {}", event.kind));
                         let res = (event.task)();
-                        print(format!("finished running a task of type: {}.", event.kind));
                         threadp_sender.send((i, event.callback_id, res)).unwrap();
                     }
                 })
@@ -218,7 +142,6 @@ impl Runtime {
                         Ok(v) if v > 0 => {
                             for i in 0..v {
                                 let event = changes.get_mut(i).expect("No events in event list.");
-                                print(format!("epoll event {} is ready", event.ident));
                                 epoll_sender.send(event.ident as usize).unwrap();
                             }
                         }
@@ -279,11 +202,6 @@ impl Runtime {
                 self.next_tick_callbacks.push((callback_id, Js::Undefined));
             }
 
-            // NOT PART OF LOOP, JUST FOR US TO SEE WHAT TICK IS EXCECUTING
-            if !self.next_tick_callbacks.is_empty() {
-                print(format!("===== TICK {} =====", ticks));
-            }
-
             // ===== CALLBACKS =====
 
             while let Some((callback_id, data)) = self.next_tick_callbacks.pop() {
@@ -328,7 +246,6 @@ impl Runtime {
             // this could be dynamically set depending on requirements or load.
             thread::park_timeout(std::time::Duration::from_millis(1));
         }
-        print("FINISHED");
     }
 
     fn schedule(&mut self) -> usize {
@@ -377,7 +294,7 @@ impl Runtime {
         if event.ident == 0 {
             event.ident = cb_id as u64 + 1_000_000;
         }
-        print(format!("Event with id: {} registered.", event.ident));
+
         self.epoll_event_cb_map
             .insert(event.ident as i64, cb_id as usize);
 
@@ -418,7 +335,6 @@ impl Runtime {
         let timeout = now + Duration::from_millis(ms);
         self.timers.insert(timeout, cb_id);
         self.pending_events += 1;
-        print(format!("Registered timer event id: {}", cb_id));
     }
 }
 
@@ -427,140 +343,4 @@ pub fn set_timeout(ms: u64, cb: impl Fn(Js) + 'static) {
     rt.set_timeout(ms, cb);
 }
 
-// ===== THIS IS PLUGINS CREATED IN C++ FOR THE NODE RUNTIME OR PART OF THE RUNTIME ITSELF =====
-// The pointer dereferencing of our runtime is not striclty needed but is mostly for trying to
-// emulate a bit of the same feeling as when you use modules in javascript. We could pass the runtime in
-// as a reference to our startup function.
 
-struct Crypto;
-impl Crypto {
-    fn encrypt(n: usize, cb: impl Fn(Js) + 'static + Clone) {
-        let work = move || {
-            fn fibonacchi(n: usize) -> usize {
-                match n {
-                    0 => 0,
-                    1 => 1,
-                    _ => fibonacchi(n - 1) + fibonacchi(n - 2),
-                }
-            }
-
-            let fib = fibonacchi(n);
-            Js::Int(fib)
-        };
-
-        let rt = unsafe { &mut *(RUNTIME as *mut Runtime) };
-        rt.register_work(work, EventKind::Encrypt, cb);
-    }
-}
-
-struct Fs;
-impl Fs {
-    fn read(path: &'static str, cb: impl Fn(Js) + 'static) {
-        let work = move || {
-            // Let's simulate that there is a very large file we're reading allowing us to actually
-            // observe how the code is executed
-            thread::sleep(std::time::Duration::from_secs(2));
-            let mut buffer = String::new();
-            fs::File::open(&path)
-                .unwrap()
-                .read_to_string(&mut buffer)
-                .unwrap();
-            Js::String(buffer)
-        };
-        let rt = unsafe { &mut *(RUNTIME as *mut Runtime) };
-        rt.register_work(work, EventKind::FileRead, cb);
-    }
-}
-
-// ===== THIS IS OUR EPOLL/KQUEUE/IOCP LIBRARY =====
-use std::net::TcpStream;
-use std::os::unix::io::{AsRawFd, RawFd};
-
-struct Io;
-impl Io {
-    pub fn http_get_slow(url: &str, delay_ms: u32, cb: impl Fn(Js) + 'static + Clone) {
-        // Don't worry, http://slowwly.robertomurray.co.uk is a site for simulating a delayed
-        // response from a server. Perfect for our use case.
-        let mut stream: TcpStream = TcpStream::connect("slowwly.robertomurray.co.uk:80").unwrap();
-        let request = format!(
-            "GET /delay/{}/url/http://{} HTTP/1.1\r\n\
-             Host: slowwly.robertomurray.co.uk\r\n\
-             Connection: close\r\n\
-             \r\n",
-            delay_ms, url
-        );
-
-        stream
-            .write_all(request.as_bytes())
-            .expect("Error writing to stream");
-        stream
-            .set_nonblocking(true)
-            .expect("set_nonblocking call failed");
-        let fd = stream.as_raw_fd();
-
-        let event = minimio::event_read(fd);
-
-        let wrapped = move |_n| {
-            let mut stream = stream;
-            // we do this to prevent getting an error if the status somehow changes between the epoll
-            // and our read. In a real implementation this should be handled by re-register the event
-            // to the epoll queue for example or just accept that there might be a very small amount
-            // of blocking happening here (it might even be more costly to re-register the task)
-            stream
-                .set_nonblocking(false)
-                .expect("Error setting stream to blocking.");
-            let mut buffer = String::new();
-            stream
-                .read_to_string(&mut buffer)
-                .expect("Error reading from stream.");
-            cb(Js::String(buffer));
-        };
-
-        let rt: &mut Runtime = unsafe { &mut *(RUNTIME as *mut Runtime) };
-        rt.register_io(event, wrapped);
-    }
-    /// URl is in www.google.com format, i.e. only the host name, we can't
-    /// request paths at this point
-    pub fn http_get(url: &str, cb: impl Fn(Js) + 'static + Clone) {
-        let url_port = format!("{}:80", url);
-        let mut stream: TcpStream = TcpStream::connect(&url_port).unwrap();
-        let request = format!(
-            "GET / HTTP/1.1\r\n\
-             Host: {}\r\n\
-             Connection: close\r\n\
-             \r\n",
-            url
-        );
-
-        stream
-            .write_all(request.as_bytes())
-            .expect("Error writing to stream");
-        stream
-            .set_nonblocking(true)
-            .expect("set_nonblocking call failed");
-        let fd = stream.as_raw_fd();
-
-        let event = minimio::event_read(fd);
-
-        let wrapped = move |_n| {
-            let mut stream = stream;
-            let mut buffer = String::new();
-            // we do this to prevent getting an error if the status somehow changes between the epoll
-            // and our read. In a real implementation this should be handled by re-register the event
-            // to the epoll queue for example or just accept that there might be a very small amount
-            // of blocking happening here (it might even be more costly to re-register the task)
-            stream
-                .set_nonblocking(false)
-                .expect("Error setting stream to blocking.");
-            stream
-                .read_to_string(&mut buffer)
-                .expect("Error reading from stream.");
-            // The way we do this we know it's a redirect so we grab the location header and
-            // get that webpage instead
-            cb(Js::String(buffer));
-        };
-
-        let rt: &mut Runtime = unsafe { &mut *(RUNTIME as *mut Runtime) };
-        rt.register_io(event, wrapped);
-    }
-}

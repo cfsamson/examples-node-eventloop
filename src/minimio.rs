@@ -2,6 +2,9 @@
 //! platform specific. The Rust community has already abstracted this away in the `mio` crate
 //! but since we want to see what really goes on under the hood we implement a sort of mini-mio
 //! library ourselves.
+
+use std::os::unix::io::{RawFd, AsRawFd};
+
 use super::*;
 pub fn queue() -> io::Result<i32> {
     if cfg!(target_os = "macos") {
