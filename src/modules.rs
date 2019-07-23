@@ -31,7 +31,7 @@ impl Crypto {
         };
 
         let rt = unsafe { &mut *(RUNTIME as *mut Runtime) };
-        rt.register_work(work, EventKind::Encrypt, cb);
+        rt.register_work(work, cb);
     }
 }
 
@@ -50,7 +50,7 @@ impl Fs {
             Js::String(buffer)
         };
         let rt = unsafe { &mut *(RUNTIME as *mut Runtime) };
-        rt.register_work(work, EventKind::FileRead, cb);
+        rt.register_work(work, cb);
     }
 }
 

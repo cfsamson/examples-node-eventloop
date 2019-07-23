@@ -9,10 +9,9 @@
 //!        println!("Hello world!");
 //!    });
 //! }
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
-use std::fs;
-use std::io::{self, Read, Write};
+use std::io;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -25,7 +24,6 @@ pub static mut RUNTIME: usize = 0;
 struct Event {
     task: Box<Fn() -> Js + Send + 'static>,
     callback_id: usize,
-    kind: EventKind,
 }
 
 pub enum EventKind {
@@ -74,8 +72,14 @@ struct NodeThread {
     sender: Sender<Event>,
 }
 
+enum Workload {
+    High,
+    Normal,
+}
+
 pub struct Runtime {
     thread_pool: Box<[NodeThread]>,
+    work_queue: VecDeque<Event>,
     available: Vec<usize>,
     callback_queue: HashMap<usize, Box<FnOnce(Js)>>,
     next_tick_callbacks: Vec<(usize, Js)>,
@@ -154,6 +158,7 @@ impl Runtime {
 
         Runtime {
             thread_pool: threads.into_boxed_slice(),
+            work_queue: VecDeque::new(),
             available: (0..4).collect(),
             callback_queue: HashMap::new(),
             next_tick_callbacks: vec![],
@@ -232,7 +237,14 @@ impl Runtime {
             // then check if there is any results from the threadpool
             while let Ok((thread_id, callback_id, data)) = self.threadp_reciever.try_recv() {
                 self.next_tick_callbacks.push((callback_id, data));
-                self.available.push(thread_id);
+                // If we have pending tasks we hijack the thread here
+                if !self.work_queue.is_empty() {
+                    let event = self.work_queue.pop_front().unwrap();
+                    self.thread_pool[thread_id].sender.send(event).unwrap();
+                    self.pending_events += 1;
+                } else {
+                    self.available.push(thread_id);
+                }
             }
 
             // ===== CHECK =====
@@ -243,17 +255,25 @@ impl Runtime {
             // to use. We release in every callback instead
 
             // Let the OS have a time slice of our thread so we don't busy loop
-            // this could be dynamically set depending on requirements or load.
-            thread::park_timeout(std::time::Duration::from_millis(1));
+            match self.current_workload() {
+                Workload::High => (),
+                Workload::Normal => thread::park_timeout(Duration::from_millis(1)),
+            }
         }
     }
 
-    fn schedule(&mut self) -> usize {
-        match self.available.pop() {
-            Some(thread_id) => thread_id,
-            // We would normally queue this
-            None => panic!("Out of threads."),
+    /// If we have any pending callbacks to execute we have to much to do to 
+    /// give the OS a time slice
+    fn current_workload(&self) -> Workload {
+        if !self.next_tick_callbacks.is_empty() {
+            Workload::High 
+        } else {
+            Workload::Normal
         }
+    }
+
+    fn schedule(&mut self) -> Option<usize> {
+        self.available.pop()
     }
 
     /// If we hit max we just wrap around
@@ -311,7 +331,6 @@ impl Runtime {
     pub fn register_work(
         &mut self,
         task: impl Fn() -> Js + Send + 'static,
-        kind: EventKind,
         cb: impl FnOnce(Js) + 'static,
     ) {
         let callback_id = self.add_callback(cb);
@@ -319,13 +338,18 @@ impl Runtime {
         let event = Event {
             task: Box::new(task),
             callback_id,
-            kind,
         };
 
         // we are not going to implement a real scheduler here, just a LIFO queue
         let available = self.schedule();
-        self.thread_pool[available].sender.send(event).unwrap();
-        self.pending_events += 1;
+        match available {
+            Some(available_id) => {
+                self.thread_pool[available_id].sender.send(event).unwrap();
+                self.pending_events += 1;
+            },
+            None => self.work_queue.push_back(event),
+        };
+        
     }
 
     fn set_timeout(&mut self, ms: u64, cb: impl Fn(Js) + 'static) {

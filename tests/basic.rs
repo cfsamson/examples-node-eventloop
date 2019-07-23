@@ -44,6 +44,28 @@ fn javascript() {
         });
     });
 
+
+    print("Third call to read test.txt");
+    Fs::read("test.txt", |result| {
+        let text = result.into_string().unwrap();
+        let len = text.len();
+        print(format!("Second count: {} characters.", len));
+    });
+
+    print("Fourth call to read test.txt");
+    Fs::read("test.txt", |result| {
+        let text = result.into_string().unwrap();
+        let len = text.len();
+        print(format!("Second count: {} characters.", len));
+    });
+
+    print("Fifth call to read test.txt");
+    Fs::read("test.txt", |result| {
+        let text = result.into_string().unwrap();
+        let len = text.len();
+        print(format!("Second count: {} characters.", len));
+    });
+
     print("Registering a 3000 ms timeout");
     set_timeout(3000, |_res| {
         print("3000ms timer timed out");
