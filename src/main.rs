@@ -1,70 +1,70 @@
 /// Think of this function as the javascript program you have written
 fn javascript() {
-    p("First call to read test.txt");
+    print("First call to read test.txt");
     Fs::read("test.txt", |result| {
         let text = result.into_string().unwrap();
         let len = text.len();
-        p(format!("First count: {} characters.", len));
+        print(format!("First count: {} characters.", len));
 
-        p("I want to encrypt something.");
+        print("I want to encrypt something.");
         Crypto::encrypt(text.len(), |result| {
             let n = result.into_int().unwrap();
-            p(format!("\"Encrypted\" number is: {}", n));
+            print(format!("\"Encrypted\" number is: {}", n));
         })
     });
 
-    p("Registering immediate timeout 1");
+    print("Registering immediate timeout 1");
     set_timeout(0, |_res| {
-        p("Immediate1 timed out");
+        print("Immediate1 timed out");
     });
-    p("Registering immediate timeout 2");
+    print("Registering immediate timeout 2");
     set_timeout(0, |_res| {
-        p("Immediate2 timed out");
+        print("Immediate2 timed out");
     });
-    p("Registering immediate timeout 3");
+    print("Registering immediate timeout 3");
     set_timeout(0, |_res| {
-        p("Immediate3 timed out");
+        print("Immediate3 timed out");
     });
 
     // let's read the file again and display the text
-    p("Second call to read test.txt");
+    print("Second call to read test.txt");
     Fs::read("test.txt", |result| {
         let text = result.into_string().unwrap();
         let len = text.len();
-        p(format!("Second count: {} characters.", len));
+        print(format!("Second count: {} characters.", len));
 
         // aaand one more time but not in parallell.
-        p("Third call to read test.txt");
+        print("Third call to read test.txt");
         Fs::read("test.txt", |result| {
             let text = result.into_string().unwrap();
-            p_content(&text, "file read");
+            print_content(&text, "file read");
         });
     });
 
-    p("Registering a 3000 ms timeout");
+    print("Registering a 3000 ms timeout");
     set_timeout(3000, |_res| {
-        p("3000ms timer timed out");
+        print("3000ms timer timed out");
         set_timeout(500, |_res| {
-            p("500ms timer(nested) timed out");
+            print("500ms timer(nested) timed out");
         });
     });
 
-    p("Registering a 1000 ms timeout");
-    set_timeout(1000,  |_res| {
-            p("SETTIMEOUT");
-        });
+    print("Registering a 1000 ms timeout");
+    set_timeout(1000, |_res| {
+        print("SETTIMEOUT");
+    });
 
-    p("Registering http get request to google.com");
+    print("Registering http get request to google.com");
     Io::http_get_slow("http//www.google.com", 2000, |result| {
         let result = result.into_string().unwrap();
-        p_content(result.trim(), "web call");
+        print_content(result.trim(), "web call");
     });
 }
-fn p(t: impl std::fmt::Display) {
+fn print(t: impl std::fmt::Display) {
     println!("Thread: {}\t {}", current(), t);
 }
 
-fn p_content(t: impl std::fmt::Display, decr: &str) {
+fn print_content(t: impl std::fmt::Display, decr: &str) {
     println!(
         "\n===== THREAD {} START CONTENT - {} =====",
         current(),
@@ -84,19 +84,17 @@ fn main() {
 }
 
 // ===== THIS IS OUR "NODE LIBRARY" =====
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 
 mod minimio;
 
 static mut RUNTIME: usize = 0;
-
-type Callback = Box<FnOnce(Js)>;
 
 struct Event {
     task: Box<Fn() -> Js + Send + 'static>,
@@ -104,7 +102,7 @@ struct Event {
     kind: EventKind,
 }
 
-enum EventKind {
+pub enum EventKind {
     FileRead,
     Encrypt,
 }
@@ -120,7 +118,7 @@ impl fmt::Display for EventKind {
 }
 
 #[derive(Debug)]
-enum Js {
+pub enum Js {
     Undefined,
     String(String),
     Int(usize),
@@ -150,10 +148,10 @@ struct NodeThread {
     sender: Sender<Event>,
 }
 
-struct Runtime {
+pub struct Runtime {
     thread_pool: Box<[NodeThread]>,
     available: Vec<usize>,
-    callback_queue: HashMap<usize, Callback>,
+    callback_queue: HashMap<usize, Box<FnOnce(Js)>>,
     next_tick_callbacks: Vec<(usize, Js)>,
     identity_token: usize,
     pending_events: usize,
@@ -167,7 +165,7 @@ struct Runtime {
 }
 
 impl Runtime {
-    fn new() -> Self {
+    pub fn new() -> Self {
         // ===== THE REGULAR THREADPOOL =====
         let (threadp_sender, threadp_reciever) = channel::<(usize, usize, Js)>();
         let mut threads = Vec::with_capacity(4);
@@ -178,9 +176,9 @@ impl Runtime {
                 .name(format!("pool{}", i))
                 .spawn(move || {
                     while let Ok(event) = evt_reciever.recv() {
-                        p(format!("recived a task of type: {}", event.kind));
+                        print(format!("recived a task of type: {}", event.kind));
                         let res = (event.task)();
-                        p(format!("finished running a task of type: {}.", event.kind));
+                        print(format!("finished running a task of type: {}.", event.kind));
                         threadp_sender.send((i, event.callback_id, res)).unwrap();
                     }
                 })
@@ -220,7 +218,7 @@ impl Runtime {
                         Ok(v) if v > 0 => {
                             for i in 0..v {
                                 let event = changes.get_mut(i).expect("No events in event list.");
-                                p(format!("epoll event {} is ready", event.ident));
+                                print(format!("epoll event {} is ready", event.ident));
                                 epoll_sender.send(event.ident as usize).unwrap();
                             }
                         }
@@ -248,27 +246,33 @@ impl Runtime {
         }
     }
 
-    /// This is the event loop
-    fn run(&mut self, f: impl Fn()) {
+    /// This is the event loop. There are several things we could do here to make it a better implementation
+    /// One is to set a max backlog of callbacks to execute in a single tick, so we don't starve the
+    /// threadpool or file handlers.
+    /// Another is to dynamically decide if/and how long the thread could be allowed to be parked for
+    /// example by looking at the backlog of events, and if there is any backlog disable it.
+    /// Some of our Vec's will only grow, and not resize, so if we have a period of very high load,
+    /// the memory will stay higher than we need until a restart. This could be dealt with or a different
+    /// data structure could be used.
+    pub fn run(&mut self, f: impl Fn()) {
         let rt_ptr: *mut Runtime = self;
         unsafe { RUNTIME = rt_ptr as usize };
 
         let mut timers_to_remove = vec![]; // avoid allocating on every loop
-        let  mut ticks = 0; // just for us priting out
+        let mut ticks = 0; // just for us priting out
 
         // First we run our "main" function
         f();
 
-        
-
         // ===== EVENT LOOP =====
         while self.pending_events > 0 {
             ticks += 1;
-            
+
             // ===== TIMERS =====
+
             self.timers
-            .range(..=Instant::now())
-            .for_each(|(k,_)| timers_to_remove.push(*k));
+                .range(..=Instant::now())
+                .for_each(|(k, _)| timers_to_remove.push(*k));
 
             while let Some(key) = timers_to_remove.pop() {
                 let callback_id = self.timers.remove(&key).unwrap();
@@ -276,12 +280,12 @@ impl Runtime {
             }
 
             // NOT PART OF LOOP, JUST FOR US TO SEE WHAT TICK IS EXCECUTING
-            
             if !self.next_tick_callbacks.is_empty() {
-                p(format!("===== TICK {} =====", ticks));
+                print(format!("===== TICK {} =====", ticks));
             }
 
             // ===== CALLBACKS =====
+
             while let Some((callback_id, data)) = self.next_tick_callbacks.pop() {
                 let cb = self.callback_queue.remove(&callback_id).unwrap();
                 cb(data);
@@ -289,9 +293,11 @@ impl Runtime {
             }
 
             // ===== IDLE/PREPARE =====
+
             // we won't use this
 
             // ===== POLL =====
+
             // First poll any epoll/kqueue
             while let Ok(event_id) = self.epoll_reciever.try_recv() {
                 let id = self
@@ -311,18 +317,18 @@ impl Runtime {
                 self.available.push(thread_id);
             }
 
-             // ===== CHECK =====
-             // a set immidiate function could be added pretty easily but we won't do that here
+            // ===== CHECK =====
+            // an set immidiate function could be added pretty easily but we won't do that here
 
-             // ===== CLOSE CALLBACKS ======
-             // Release resources, we won't do that here, it's just another "hook" for our "extensions"
-             // to use. We release in every callback instead
+            // ===== CLOSE CALLBACKS ======
+            // Release resources, we won't do that here, it's just another "hook" for our "extensions"
+            // to use. We release in every callback instead
 
             // Let the OS have a time slice of our thread so we don't busy loop
             // this could be dynamically set depending on requirements or load.
             thread::park_timeout(std::time::Duration::from_millis(1));
         }
-        p("FINISHED");
+        print("FINISHED");
     }
 
     fn schedule(&mut self) -> usize {
@@ -364,14 +370,14 @@ impl Runtime {
         }
     }
 
-    fn register_io(&mut self, mut event: minimio::Event, cb: impl FnOnce(Js) + 'static) {
+    pub fn register_io(&mut self, mut event: minimio::Event, cb: impl FnOnce(Js) + 'static) {
         let cb_id = self.add_callback(cb) as i64;
 
         // if no ident is set, set it equal to cb_id + 1 000 000
         if event.ident == 0 {
             event.ident = cb_id as u64 + 1_000_000;
         }
-        p(format!("Event with id: {} registered.", event.ident));
+        print(format!("Event with id: {} registered.", event.ident));
         self.epoll_event_cb_map
             .insert(event.ident as i64, cb_id as usize);
 
@@ -385,7 +391,7 @@ impl Runtime {
             .expect("Sending to epoll_starter.");
     }
 
-    fn register_work(
+    pub fn register_work(
         &mut self,
         task: impl Fn() -> Js + Send + 'static,
         kind: EventKind,
@@ -412,10 +418,11 @@ impl Runtime {
         let timeout = now + Duration::from_millis(ms);
         self.timers.insert(timeout, cb_id);
         self.pending_events += 1;
+        print(format!("Registered timer event id: {}", cb_id));
     }
 }
 
-fn set_timeout(ms: u64, cb: impl Fn(Js) + 'static) {
+pub fn set_timeout(ms: u64, cb: impl Fn(Js) + 'static) {
     let rt = unsafe { &mut *(RUNTIME as *mut Runtime) };
     rt.set_timeout(ms, cb);
 }

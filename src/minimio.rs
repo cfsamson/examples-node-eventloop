@@ -93,7 +93,6 @@ mod macos {
         }
     }
 
-
     pub fn kqueue() -> io::Result<i32> {
         let fd = unsafe { ffi::kqueue() };
         if fd < 0 {
