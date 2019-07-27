@@ -93,9 +93,9 @@ pub struct Runtime {
     epoll_event_cb_map: HashMap<i64, usize>,
     timers: BTreeMap<Instant, usize>,
 }
-
+ 
 impl Runtime {
-    pub fn new() -> Self {
+    pub fn default() -> Self {
         // ===== THE REGULAR THREADPOOL =====
         let (threadp_sender, threadp_reciever) = channel::<(usize, usize, Js)>();
         let mut threads = Vec::with_capacity(4);
