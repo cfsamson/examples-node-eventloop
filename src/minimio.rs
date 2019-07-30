@@ -2,7 +2,38 @@
 //! platform specific. The Rust community has already abstracted this away in the combination of the
 //! `libc` and `mio` crates but since we want to see what really goes on under the hood we implement 
 //! a sort of mini-mio library ourselves.
+
+//! Take a look at this: http://www.wangafu.net/~nickm/libevent-book/01_intro.html
+//! 
+//! Design:
+//! Maybe use two threads? 
+//! Thread 1: Runs the event loop
+//! Thread 2: Reads the data when it's ready to be read and sends it through the channel
+//! 
+//! We have our threadpool and we have our eventloop
+//! - Our main thread registers events
+//! - The eventloop runs in a seperate thread
+//! - The eventloop wakes when a fd or socket returns
+//! 
+//! If on unix:
+//! - Wait for the event - when it wakes data is ready for reading
+//! - Start reading and fill a buffer with data
+//! - Send the data + event_id to the main thread
+//! 
+//! If on Windows:
+//! - Provide a buffer with the event
+//! - Get the buffer filled with data when the thread wakens
+//! - Return the buffer + event id to the main thread
+//! 
+//! From the "user" side the implementations doesn't differ, since they register an event and just
+//! checks the channel if it has recieved any "data + event_id"
+
+
 use super::*;
+#[cfg(target_os = "macos")]
+pub use macos::{Event, poll, create_queue, register};
+#[cfg(target_os = "linux")]
+pub use linux::{Event, poll, create_queue, register};
 
 #[cfg(target_os = "macos")]
 pub type Event = macos::ffi::Kevent;
@@ -46,14 +77,7 @@ pub fn add_event(queue: i32, event_list: &[Event], timeout_ms: usize) -> io::Res
 
 pub fn event_read(fd: RawFd) -> Event {
     if cfg!(target_os = "macos") {
-        Event {
-            ident: fd as u64,
-            filter: macos::EVFILT_READ,
-            flags: macos::EV_ADD | macos::EV_ENABLE | macos::EV_ONESHOT,
-            fflags: 0,
-            data: 0,
-            udata: 0,
-        }
+        
     } else {
         unimplemented!("Operating system not supported")
     }
@@ -71,13 +95,28 @@ mod macos {
     pub const EV_ENABLE: u16 = 0x4;
     pub const EV_ONESHOT: u16 = 0x10;
 
-    pub fn kqueue() -> io::Result<i32> {
+    pub type Event = Kevent;
+    impl Event {
+        fn read_event(fd: RawFd) -> Self {
+            Event {
+            ident: fd as u64,
+            filter: macos::EVFILT_READ,
+            flags: macos::EV_ADD | macos::EV_ENABLE | macos::EV_ONESHOT,
+            fflags: 0,
+            data: 0,
+            udata: 0,
+        }
+        }
+    }
+
+    pub fn queue() -> io::Result<i32> {
         let fd = unsafe { ffi::kqueue() };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(fd)
     }
+
 
     pub fn kevent(
         kq: RawFd,
