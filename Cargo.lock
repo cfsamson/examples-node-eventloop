@@ -10,7 +10,7 @@ dependencies = [
 [[package]]
 name = "minimio"
 version = "0.1.0"
-source = "git+https://github.com/cfsamson/examples-io-eventloop#a61f40566444a15d10d872ad1cc3e78003e1bf93"
+source = "git+https://github.com/cfsamson/examples-io-eventloop#fb5e576472586f08550680dcad48c943835dde54"
 
 [metadata]
 "checksum minimio 0.1.0 (git+https://github.com/cfsamson/examples-io-eventloop)" = "<none>"
