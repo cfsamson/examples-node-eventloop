@@ -60,15 +60,16 @@ fn javascript() {
         print_content(result.trim(), "web call");
     });
 }
+
 fn print(t: impl std::fmt::Display) {
     println!("Thread: {}\t {}", current(), t);
 }
 
-fn print_content(t: impl std::fmt::Display, decr: &str) {
+fn print_content(t: impl std::fmt::Display, descr: &str) {
     println!(
         "\n===== THREAD {} START CONTENT - {} =====",
         current(),
-        decr.to_uppercase()
+        descr.to_uppercase()
     );
     println!("{}", t);
     println!("===== END CONTENT =====\n");
