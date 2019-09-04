@@ -201,7 +201,6 @@ impl Runtime {
         let registrator = poll.registrator();
         thread::Builder::new()
             .name("epoll".to_string())
-            // TODO: Fix allocation in loop
             .spawn(move || {
                 let mut events = minimio::Events::with_capacity(1024);
                 loop {
