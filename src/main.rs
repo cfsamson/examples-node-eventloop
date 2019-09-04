@@ -92,7 +92,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-mod minimio;
+use minimio;
 
 static mut RUNTIME: usize = 0;
 
@@ -157,11 +157,12 @@ pub struct Runtime {
     pending_events: usize,
     threadp_reciever: Receiver<(usize, usize, Js)>,
     epoll_reciever: Receiver<usize>,
-    epoll_queue: i32,
+    //epoll_queue: i32,
     epoll_pending: usize,
-    epoll_starter: Sender<usize>,
+    //epoll_starter: Sender<usize>,
     epoll_event_cb_map: HashMap<i64, usize>,
     timers: BTreeMap<Instant, usize>,
+    epoll_registrator: minimio::Registrator,
 }
 
 impl Runtime {
@@ -195,38 +196,27 @@ impl Runtime {
         // ===== EPOLL THREAD =====
         // Only wakes up when there is a task ready
         let (epoll_sender, epoll_reciever) = channel::<usize>();
-        let (epoll_start_sender, epoll_start_reciever) = channel::<usize>();
-        let queue = minimio::queue().expect("Error creating epoll queue");
+        //let (epoll_start_sender, epoll_start_reciever) = channel::<usize>();
+        let mut poll = minimio::Poll::new().expect("Error creating epoll queue");
+        let registrator = poll.registrator();
         thread::Builder::new()
             .name("epoll".to_string())
-            .spawn(move || loop {
-                // let mut changes: Vec<minimio::Event> = (0..MAX_EPOLL_EVENTS)
-                // .map(|_| minimio::Event::default())
-                // .collect();
-
-                let mut changes = vec![];
-                while let Ok(current_event_count) = epoll_start_reciever.recv() {
-                    // We increase the size to hold the current number of events but
-                    // it will always grow to the largest load and stay there. We could implement
-                    // a resize strategy to not hold on to more memory than we need but won't do
-                    // that here
-                    if changes.len() < current_event_count {
-                        let missing = current_event_count - changes.len();
-                        (0..missing).for_each(|_| changes.push(minimio::Event::default()));
-                    }
-                    match minimio::poll(queue, changes.as_mut_slice(), 0, None) {
+            // TODO: Fix allocation in loop
+            .spawn(move || {
+                let mut events = minimio::Events::with_capacity(1024);
+                loop {
+                    match poll.poll(&mut events) {
                         Ok(v) if v > 0 => {
                             for i in 0..v {
-                                let event = changes.get_mut(i).expect("No events in event list.");
-                                print(format!("epoll event {} is ready", event.ident));
-                                epoll_sender.send(event.ident as usize).unwrap();
+                                let event = events.get_mut(i).expect("No events in event list.");
+                                print(format!("epoll event {} is ready", event.id().value()));
+                                epoll_sender.send(event.id().value() as usize).unwrap();
                             }
                         }
                         Err(e) => panic!("{:?}", e),
                         _ => (),
                     }
-                }
-            })
+            }})
             .expect("Error creating epoll thread");
 
         Runtime {
@@ -238,11 +228,12 @@ impl Runtime {
             pending_events: 0,
             threadp_reciever,
             epoll_reciever,
-            epoll_queue: queue,
+            //epoll_queue: queue,
             epoll_pending: 0,
-            epoll_starter: epoll_start_sender,
+            //epoll_starter: epoll_start_sender,
             epoll_event_cb_map: HashMap::new(),
             timers: BTreeMap::new(),
+            epoll_registrator: registrator,
         }
     }
 
@@ -345,11 +336,8 @@ impl Runtime {
         self.identity_token
     }
 
-    /// Adds a callback to the queue and returns the key
-    fn add_callback(&mut self, cb: impl FnOnce(Js) + 'static) -> usize {
-        // this is the happy path
+    fn generate_cb_identity(&mut self) -> usize {
         let ident = self.generate_identity();
-        let boxed_cb = Box::new(cb);
         let taken = self.callback_queue.contains_key(&ident);
 
         // if there is a collision or the identity is already there we loop until we find a new one
@@ -357,38 +345,43 @@ impl Runtime {
         // that if we're fast and queue a new event every nanosecond that will still take 585.5 years
         // to do on a 64 bit system.
         if !taken {
-            self.callback_queue.insert(ident, boxed_cb);
             ident
         } else {
             loop {
                 let possible_ident = self.generate_identity();
                 if self.callback_queue.contains_key(&possible_ident) {
-                    self.callback_queue.insert(possible_ident, boxed_cb);
                     break possible_ident;
                 }
             }
-        }
+        } 
+
     }
 
-    pub fn register_io(&mut self, mut event: minimio::Event, cb: impl FnOnce(Js) + 'static) {
-        let cb_id = self.add_callback(cb) as i64;
+    /// Adds a callback to the queue and returns the key
+    fn add_callback(&mut self, ident: usize, cb: impl FnOnce(Js) + 'static) {
+        // this is the happy path
+        
+        let boxed_cb = Box::new(cb);
+        self.callback_queue.insert(ident, boxed_cb);
+        
+ 
+    }
+
+    pub fn register_io(&mut self, token: usize, cb: impl FnOnce(Js) + 'static) {
+        self.add_callback(token, cb);
 
         // if no ident is set, set it equal to cb_id + 1 000 000
-        if event.ident == 0 {
-            event.ident = cb_id as u64 + 1_000_000;
-        }
-        print(format!("Event with id: {} registered.", event.ident));
+        // if event.ident == 0 {
+        //     event.ident = cb_id as u64 + 1_000_000;
+        // }
+        print(format!("Event with id: {} registered.", token));
         self.epoll_event_cb_map
-            .insert(event.ident as i64, cb_id as usize);
-
-        minimio::add_event(self.epoll_queue, &[event.clone()], 0)
-            .expect("Error adding event to queue.");
-
+            .insert(token as i64, token);
         self.pending_events += 1;
         self.epoll_pending += 1;
-        self.epoll_starter
-            .send(self.epoll_pending)
-            .expect("Sending to epoll_starter.");
+        // self.epoll_starter
+        //     .send(self.epoll_pending)
+        //     .expect("Sending to epoll_starter.");
     }
 
     pub fn register_work(
@@ -397,7 +390,8 @@ impl Runtime {
         kind: EventKind,
         cb: impl FnOnce(Js) + 'static,
     ) {
-        let callback_id = self.add_callback(cb);
+        let callback_id = self.generate_cb_identity();
+        self.add_callback(callback_id, cb);
 
         let event = Event {
             task: Box::new(task),
@@ -414,7 +408,8 @@ impl Runtime {
     fn set_timeout(&mut self, ms: u64, cb: impl Fn(Js) + 'static) {
         // Is it theoretically possible to get two equal instants? If so we will have a bug...
         let now = Instant::now();
-        let cb_id = self.add_callback(cb);
+        let cb_id = self.generate_cb_identity();
+        self.add_callback(cb_id, cb);
         let timeout = now + Duration::from_millis(ms);
         self.timers.insert(timeout, cb_id);
         self.pending_events += 1;
@@ -479,9 +474,10 @@ use std::os::unix::io::{AsRawFd, RawFd};
 struct Io;
 impl Io {
     pub fn http_get_slow(url: &str, delay_ms: u32, cb: impl Fn(Js) + 'static + Clone) {
+        let rt: &mut Runtime = unsafe { &mut *(RUNTIME as *mut Runtime) };
         // Don't worry, http://slowwly.robertomurray.co.uk is a site for simulating a delayed
         // response from a server. Perfect for our use case.
-        let mut stream: TcpStream = TcpStream::connect("slowwly.robertomurray.co.uk:80").unwrap();
+        let mut stream: minimio::TcpStream = minimio::TcpStream::connect("slowwly.robertomurray.co.uk:80").unwrap();
         let request = format!(
             "GET /delay/{}/url/http://{} HTTP/1.1\r\n\
              Host: slowwly.robertomurray.co.uk\r\n\
@@ -493,12 +489,13 @@ impl Io {
         stream
             .write_all(request.as_bytes())
             .expect("Error writing to stream");
-        stream
-            .set_nonblocking(true)
-            .expect("set_nonblocking call failed");
-        let fd = stream.as_raw_fd();
+        // stream
+        //     .set_nonblocking(true)
+        //     .expect("set_nonblocking call failed");
+        // let fd = stream.as_raw_fd();
 
-        let event = minimio::event_read(fd);
+        let token = rt.generate_cb_identity();
+        rt.epoll_registrator.register(&mut stream, token, minimio::Interests::readable()).unwrap();
 
         let wrapped = move |_n| {
             let mut stream = stream;
@@ -506,9 +503,9 @@ impl Io {
             // and our read. In a real implementation this should be handled by re-register the event
             // to the epoll queue for example or just accept that there might be a very small amount
             // of blocking happening here (it might even be more costly to re-register the task)
-            stream
-                .set_nonblocking(false)
-                .expect("Error setting stream to blocking.");
+            // stream
+            //     .set_nonblocking(false)
+            //     .expect("Error setting stream to blocking.");
             let mut buffer = String::new();
             stream
                 .read_to_string(&mut buffer)
@@ -516,51 +513,52 @@ impl Io {
             cb(Js::String(buffer));
         };
 
-        let rt: &mut Runtime = unsafe { &mut *(RUNTIME as *mut Runtime) };
-        rt.register_io(event, wrapped);
-    }
-    /// URl is in www.google.com format, i.e. only the host name, we can't
-    /// request paths at this point
-    pub fn http_get(url: &str, cb: impl Fn(Js) + 'static + Clone) {
-        let url_port = format!("{}:80", url);
-        let mut stream: TcpStream = TcpStream::connect(&url_port).unwrap();
-        let request = format!(
-            "GET / HTTP/1.1\r\n\
-             Host: {}\r\n\
-             Connection: close\r\n\
-             \r\n",
-            url
-        );
-
-        stream
-            .write_all(request.as_bytes())
-            .expect("Error writing to stream");
-        stream
-            .set_nonblocking(true)
-            .expect("set_nonblocking call failed");
-        let fd = stream.as_raw_fd();
-
-        let event = minimio::event_read(fd);
-
-        let wrapped = move |_n| {
-            let mut stream = stream;
-            let mut buffer = String::new();
-            // we do this to prevent getting an error if the status somehow changes between the epoll
-            // and our read. In a real implementation this should be handled by re-register the event
-            // to the epoll queue for example or just accept that there might be a very small amount
-            // of blocking happening here (it might even be more costly to re-register the task)
-            stream
-                .set_nonblocking(false)
-                .expect("Error setting stream to blocking.");
-            stream
-                .read_to_string(&mut buffer)
-                .expect("Error reading from stream.");
-            // The way we do this we know it's a redirect so we grab the location header and
-            // get that webpage instead
-            cb(Js::String(buffer));
-        };
-
-        let rt: &mut Runtime = unsafe { &mut *(RUNTIME as *mut Runtime) };
-        rt.register_io(event, wrapped);
+        
+        rt.register_io(token, wrapped);
     }
 }
+
+    // URl is in www.google.com format, i.e. only the host name, we can't
+    // request paths at this point
+    // pub fn http_get(url: &str, cb: impl Fn(Js) + 'static + Clone) {
+    //     let url_port = format!("{}:80", url);
+    //     let mut stream: TcpStream = TcpStream::connect(&url_port).unwrap();
+    //     let request = format!(
+    //         "GET / HTTP/1.1\r\n\
+    //          Host: {}\r\n\
+    //          Connection: close\r\n\
+    //          \r\n",
+    //         url
+    //     );
+
+    //     stream
+    //         .write_all(request.as_bytes())
+    //         .expect("Error writing to stream");
+    //     stream
+    //         .set_nonblocking(true)
+    //         .expect("set_nonblocking call failed");
+    //     let fd = stream.as_raw_fd();
+
+    //     //let event = minimio::event_read(fd);
+
+    //     let wrapped = move |_n| {
+    //         let mut stream = stream;
+    //         let mut buffer = String::new();
+    //         // we do this to prevent getting an error if the status somehow changes between the epoll
+    //         // and our read. In a real implementation this should be handled by re-register the event
+    //         // to the epoll queue for example or just accept that there might be a very small amount
+    //         // of blocking happening here (it might even be more costly to re-register the task)
+    //         stream
+    //             .set_nonblocking(false)
+    //             .expect("Error setting stream to blocking.");
+    //         stream
+    //             .read_to_string(&mut buffer)
+    //             .expect("Error reading from stream.");
+    //         // The way we do this we know it's a redirect so we grab the location header and
+    //         // get that webpage instead
+    //         cb(Js::String(buffer));
+    //     };
+
+    //     let rt: &mut Runtime = unsafe { &mut *(RUNTIME as *mut Runtime) };
+    //     rt.register_io(event, wrapped);
+    // }
