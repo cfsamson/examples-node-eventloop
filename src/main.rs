@@ -468,8 +468,6 @@ impl Fs {
 }
 
 // ===== THIS IS OUR EPOLL/KQUEUE/IOCP LIBRARY =====
-use std::net::TcpStream;
-use std::os::unix::io::{AsRawFd, RawFd};
 
 struct Io;
 impl Io {
