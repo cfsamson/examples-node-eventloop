@@ -88,7 +88,7 @@ fn main() {
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -98,7 +98,7 @@ use minimio;
 static mut RUNTIME: usize = 0;
 
 struct Event {
-    task: Box<Fn() -> Js + Send + 'static>,
+    task: Box<dyn Fn() -> Js + Send + 'static>,
     callback_id: usize,
     kind: EventKind,
 }
@@ -152,7 +152,7 @@ struct NodeThread {
 pub struct Runtime {
     thread_pool: Box<[NodeThread]>,
     available: Vec<usize>,
-    callback_queue: HashMap<usize, Box<FnOnce(Js)>>,
+    callback_queue: HashMap<usize, Box<dyn FnOnce(Js)>>,
     next_tick_callbacks: Vec<(usize, Js)>,
     identity_token: usize,
     pending_events: usize,
