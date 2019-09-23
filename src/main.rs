@@ -153,7 +153,7 @@ pub struct Runtime {
     thread_pool: Box<[NodeThread]>,
     available: Vec<usize>,
     callback_queue: HashMap<usize, Box<dyn FnOnce(Js)>>,
-    next_tick_callbacks: Vec<(usize, Js)>,
+    callbacks_to_run: Vec<(usize, Js)>,
     identity_token: usize,
     pending_events: usize,
     threadp_reciever: Receiver<(usize, usize, Js)>,
@@ -222,7 +222,7 @@ impl Runtime {
             thread_pool: threads.into_boxed_slice(),
             available: (0..4).collect(),
             callback_queue: HashMap::new(),
-            next_tick_callbacks: vec![],
+            callbacks_to_run: vec![],
             identity_token: 0,
             pending_events: 0,
             threadp_reciever,
@@ -234,14 +234,15 @@ impl Runtime {
         }
     }
 
-    /// This is the event loop. There are several things we could do here to make it a better implementation
-    /// One is to set a max backlog of callbacks to execute in a single tick, so we don't starve the
-    /// threadpool or file handlers.
-    /// Another is to dynamically decide if/and how long the thread could be allowed to be parked for
-    /// example by looking at the backlog of events, and if there is any backlog disable it.
-    /// Some of our Vec's will only grow, and not resize, so if we have a period of very high load,
-    /// the memory will stay higher than we need until a restart. This could be dealt with or a different
-    /// data structure could be used.
+    /// This is the event loop. There are several things we could do here to 
+    /// make it a better implementation. One is to set a max backlog of callbacks 
+    /// to execute in a single tick, so we don't starve the threadpool or file 
+    /// handlers. Another is to dynamically decide if/and how long the thread 
+    /// could be allowed to be parked for example by looking at the backlog of 
+    /// events, and if there is any backlog disable it. Some of our Vec's will 
+    /// only grow, and not resize, so if we have a period of very high load, the
+    /// memory will stay higher than we need until a restart. This could be
+    /// dealt by using a different kind of data structure like a `LinkedList`.
     pub fn run(&mut self, f: impl Fn()) {
         let rt_ptr: *mut Runtime = self;
         unsafe { RUNTIME = rt_ptr as usize };
@@ -260,26 +261,36 @@ impl Runtime {
             self.effectuate_timers(&mut timers_to_remove);
 
             // NOT PART OF LOOP, JUST FOR US TO SEE WHAT TICK IS EXCECUTING
-            if !self.next_tick_callbacks.is_empty() {
+            if !self.callbacks_to_run.is_empty() {
                 print(format!("===== TICK {} =====", ticks));
             }
 
             // ===== 2. CALLBACKS =====
+            // Timer callbacks and if for some reason we have postponed callbacks
+            // to run on the next tick. Not possible in our implementation though.
             self.run_callbacks();
 
             // ===== 3. IDLE/PREPARE =====
             // we won't use this
 
             // ===== 4. POLL =====
+            // NB! Timeout! Normally we set these "blocking" polls to time out
+            // when we calculate the next timer to expire, we set that as the
+            // timeout to our epoll queue. Then we block the loop while waiting
+            // for an event to happen or a timeout to expire.
             self.process_epoll_events();
+            self.run_callbacks();
+
             self.process_threadpool_events();
+            self.run_callbacks();
 
             // ===== 5. CHECK =====
-            // an set immidiate function could be added pretty easily but we won't do that here
+            // an set immidiate function could be added pretty easily but we 
+            // won't do that here
 
             // ===== 6. CLOSE CALLBACKS ======
-            // Release resources, we won't do that here, it's just another "hook" for our "extensions"
-            // to use. We release in every callback instead
+            // Release resources, we won't do that here, but this is typically
+            // where sockets etc are closed.
 
             // Let the OS have a time slice of our thread so we don't busy loop
             // this could be dynamically set depending on requirements or load.
@@ -295,12 +306,12 @@ impl Runtime {
 
         while let Some(key) = timers_to_remove.pop() {
             let callback_id = self.timers.remove(&key).unwrap();
-            self.next_tick_callbacks.push((callback_id, Js::Undefined));
+            self.callbacks_to_run.push((callback_id, Js::Undefined));
         }
     }
 
     fn run_callbacks(&mut self) {
-        while let Some((callback_id, data)) = self.next_tick_callbacks.pop() {
+        while let Some((callback_id, data)) = self.callbacks_to_run.pop() {
             let cb = self.callback_queue.remove(&callback_id).unwrap();
             cb(data);
             self.pending_events -= 1;
@@ -316,14 +327,14 @@ impl Runtime {
             let callback_id = *id;
             self.epoll_event_cb_map.remove(&(event_id as i64));
 
-            self.next_tick_callbacks.push((callback_id, Js::Undefined));
+            self.callbacks_to_run.push((callback_id, Js::Undefined));
             self.epoll_pending_events -= 1;
         }
     }
 
     fn process_threadpool_events(&mut self) {
         while let Ok((thread_id, callback_id, data)) = self.threadp_reciever.try_recv() {
-            self.next_tick_callbacks.push((callback_id, data));
+            self.callbacks_to_run.push((callback_id, data));
             self.available.push(thread_id);
         }
     }
