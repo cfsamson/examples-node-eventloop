@@ -279,8 +279,6 @@ impl Runtime {
             // timeout to our epoll queue. Then we block the loop while waiting
             // for an event to happen or a timeout to expire.
             self.process_epoll_events();
-            self.run_callbacks();
-
             self.process_threadpool_events();
             self.run_callbacks();
 
@@ -375,7 +373,6 @@ impl Runtime {
 
     /// Adds a callback to the queue and returns the key
     fn add_callback(&mut self, ident: usize, cb: impl FnOnce(Js) + 'static) {
-        // this is the happy path
         let boxed_cb = Box::new(cb);
         self.callback_queue.insert(ident, boxed_cb);
     }
@@ -383,17 +380,10 @@ impl Runtime {
     pub fn register_io(&mut self, token: usize, cb: impl FnOnce(Js) + 'static) {
         self.add_callback(token, cb);
 
-        // if no ident is set, set it equal to cb_id + 1 000 000
-        // if event.ident == 0 {
-        //     event.ident = cb_id as u64 + 1_000_000;
-        // }
         print(format!("Event with id: {} registered.", token));
         self.epoll_event_cb_map.insert(token as i64, token);
         self.pending_events += 1;
         self.epoll_pending_events += 1;
-        // self.epoll_starter
-        //     .send(self.epoll_pending)
-        //     .expect("Sending to epoll_starter.");
     }
 
     pub fn register_work(
@@ -500,10 +490,6 @@ impl Io {
         stream
             .write_all(request.as_bytes())
             .expect("Error writing to stream");
-        // stream
-        //     .set_nonblocking(true)
-        //     .expect("set_nonblocking call failed");
-        // let fd = stream.as_raw_fd();
 
         let token = rt.generate_cb_identity();
         rt.epoll_registrator
@@ -516,9 +502,6 @@ impl Io {
             // and our read. In a real implementation this should be handled by re-register the event
             // to the epoll queue for example or just accept that there might be a very small amount
             // of blocking happening here (it might even be more costly to re-register the task)
-            // stream
-            //     .set_nonblocking(false)
-            //     .expect("Error setting stream to blocking.");
             let mut buffer = String::new();
             stream
                 .read_to_string(&mut buffer)
@@ -529,48 +512,3 @@ impl Io {
         rt.register_io(token, wrapped);
     }
 }
-
-// URl is in www.google.com format, i.e. only the host name, we can't
-// request paths at this point
-// pub fn http_get(url: &str, cb: impl Fn(Js) + 'static + Clone) {
-//     let url_port = format!("{}:80", url);
-//     let mut stream: TcpStream = TcpStream::connect(&url_port).unwrap();
-//     let request = format!(
-//         "GET / HTTP/1.1\r\n\
-//          Host: {}\r\n\
-//          Connection: close\r\n\
-//          \r\n",
-//         url
-//     );
-
-//     stream
-//         .write_all(request.as_bytes())
-//         .expect("Error writing to stream");
-//     stream
-//         .set_nonblocking(true)
-//         .expect("set_nonblocking call failed");
-//     let fd = stream.as_raw_fd();
-
-//     //let event = minimio::event_read(fd);
-
-//     let wrapped = move |_n| {
-//         let mut stream = stream;
-//         let mut buffer = String::new();
-//         // we do this to prevent getting an error if the status somehow changes between the epoll
-//         // and our read. In a real implementation this should be handled by re-register the event
-//         // to the epoll queue for example or just accept that there might be a very small amount
-//         // of blocking happening here (it might even be more costly to re-register the task)
-//         stream
-//             .set_nonblocking(false)
-//             .expect("Error setting stream to blocking.");
-//         stream
-//             .read_to_string(&mut buffer)
-//             .expect("Error reading from stream.");
-//         // The way we do this we know it's a redirect so we grab the location header and
-//         // get that webpage instead
-//         cb(Js::String(buffer));
-//     };
-
-//     let rt: &mut Runtime = unsafe { &mut *(RUNTIME as *mut Runtime) };
-//     rt.register_io(event, wrapped);
-// }
