@@ -88,14 +88,16 @@ fn main() {
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use minimio;
 
+const DEFAULT_TIMEOUT_MS = 50;
 static mut RUNTIME: usize = 0;
+
 
 struct Event {
     task: Box<dyn Fn() -> Js + Send + 'static>,
@@ -150,29 +152,35 @@ struct NodeThread {
 }
 
 pub struct Runtime {
-    thread_pool: Box<[NodeThread]>,
-    available: Vec<usize>,
-    callback_queue: HashMap<usize, Box<dyn FnOnce(Js)>>,
+    available_threads: Vec<usize>,
     callbacks_to_run: Vec<(usize, Js)>,
+    callback_queue: HashMap<usize, Box<dyn FnOnce(Js)>>,
+    epoll_event_cb_map: HashMap<i64, usize>,
+    epoll_pending_events: usize,
+    epoll_registrator: minimio::Registrator,
+    event_reciever: Receiver<PollEvent>,
     identity_token: usize,
     pending_events: usize,
-    threadp_reciever: Receiver<(usize, usize, Js)>,
-    epoll_reciever: Receiver<usize>,
-    epoll_pending_events: usize,
-    epoll_event_cb_map: HashMap<i64, usize>,
+    thread_pool: Box<[NodeThread]>,
     timers: BTreeMap<Instant, usize>,
-    epoll_registrator: minimio::Registrator,
+    timers_to_remove: Vec<Instant>,
+}
+
+enum PollEvent {
+    Threadpool((usize, usize, Js)),
+    Epoll(usize),
+    Timeout,
 }
 
 
 impl Runtime {
     pub fn new() -> Self {
         // ===== THE REGULAR THREADPOOL =====
-        let (threadp_sender, threadp_reciever) = channel::<(usize, usize, Js)>();
+        let (event_sender, event_reciever) = channel::<PollEvent>();
         let mut threads = Vec::with_capacity(4);
         for i in 0..4 {
             let (evt_sender, evt_reciever) = channel::<Event>();
-            let threadp_sender = threadp_sender.clone();
+            let event_sender = event_sender.clone();
             let handle = thread::Builder::new()
                 .name(format!("pool{}", i))
                 .spawn(move || {
@@ -180,7 +188,8 @@ impl Runtime {
                         print(format!("recived a task of type: {}", event.kind));
                         let res = (event.task)();
                         print(format!("finished running a task of type: {}.", event.kind));
-                        threadp_sender.send((i, event.callback_id, res)).unwrap();
+                        let event = PollEvent::Threadpool((i, event.callback_id, res));
+                        event_sender.send(event).unwrap();
                     }
                 })
                 .expect("Couldn't initialize thread pool.");
@@ -195,7 +204,7 @@ impl Runtime {
 
         // ===== EPOLL THREAD =====
         // Only wakes up when there is a task ready
-        let (epoll_sender, epoll_reciever) = channel::<usize>();
+        // let (epoll_sender, epoll_reciever) = channel::<usize>();
         let mut poll = minimio::Poll::new().expect("Error creating epoll queue");
         let registrator = poll.registrator();
         thread::Builder::new()
@@ -208,8 +217,12 @@ impl Runtime {
                             for i in 0..v {
                                 let event = events.get_mut(i).expect("No events in event list.");
                                 print(format!("epoll event {} is ready", event.id().value()));
-                                epoll_sender.send(event.id().value() as usize).unwrap();
+                                let event = PollEvent::Epoll(event.id().value() as usize);
+                                event_sender.send(event).unwrap();
                             }
+                        },
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                            event_sender.send(PollEvent::Timeout).unwrap();
                         }
                         Err(e) => panic!("{:?}", e),
                         _ => (),
@@ -219,18 +232,18 @@ impl Runtime {
             .expect("Error creating epoll thread");
 
         Runtime {
-            thread_pool: threads.into_boxed_slice(),
-            available: (0..4).collect(),
-            callback_queue: HashMap::new(),
+            available_threads: (0..4).collect(),
             callbacks_to_run: vec![],
+            callback_queue: HashMap::new(),
+            epoll_event_cb_map: HashMap::new(),
+            epoll_pending_events: 0,
+            epoll_registrator: registrator,
+            event_reciever,
             identity_token: 0,
             pending_events: 0,
-            threadp_reciever,
-            epoll_reciever,
-            epoll_pending_events: 0,
-            epoll_event_cb_map: HashMap::new(),
+            thread_pool: threads.into_boxed_slice(),
             timers: BTreeMap::new(),
-            epoll_registrator: registrator,
+            timers_to_remove: vec![],
         }
     }
 
@@ -246,8 +259,6 @@ impl Runtime {
     pub fn run(&mut self, f: impl Fn()) {
         let rt_ptr: *mut Runtime = self;
         unsafe { RUNTIME = rt_ptr as usize };
-
-        let mut timers_to_remove = vec![]; // avoid allocating on every loop
         let mut ticks = 0; // just for us priting out
 
         // First we run our "main" function
@@ -258,7 +269,7 @@ impl Runtime {
             ticks += 1;
 
             // ===== 2. TIMERS =====
-            self.effectuate_timers(&mut timers_to_remove);
+            self.process_expired_timers();
 
             // NOT PART OF LOOP, JUST FOR US TO SEE WHAT TICK IS EXCECUTING
             if !self.callbacks_to_run.is_empty() {
@@ -278,8 +289,18 @@ impl Runtime {
             // when we calculate the next timer to expire, we set that as the
             // timeout to our epoll queue. Then we block the loop while waiting
             // for an event to happen or a timeout to expire.
-            self.process_epoll_events();
-            self.process_threadpool_events();
+
+            for event in self.event_reciever.recv() {
+                match event {
+                    PollEvent::Timeout => (),
+                    PollEvent::Threadpool((thread_id, callback_id, data)) => {
+                        self.process_threadpool_events(thread_id, callback_id, data);
+                    },
+                    PollEvent::Epoll(event_id) => {
+                        self.process_epoll_events(event_id);
+                    }
+                }
+            }
             self.run_callbacks();
 
             // ===== 5. CHECK =====
@@ -292,17 +313,20 @@ impl Runtime {
 
             // Let the OS have a time slice of our thread so we don't busy loop
             // this could be dynamically set depending on requirements or load.
-            thread::park_timeout(std::time::Duration::from_millis(1));
+            //thread::park_timeout(std::time::Duration::from_millis(1));
         }
         print("FINISHED");
     }
 
-    fn effectuate_timers(&mut self, timers_to_remove: &mut Vec<Instant>) {
-        self.timers
+    fn process_expired_timers(&mut self) {
+        // Need an intermediate variable to please the borrowchecker
+        let timers_to_remove = &mut self.timers_to_remove;
+
+        &self.timers
             .range(..=Instant::now())
             .for_each(|(k, _)| timers_to_remove.push(*k));
 
-        while let Some(key) = timers_to_remove.pop() {
+        while let Some(key) = self.timers_to_remove.pop() {
             let callback_id = self.timers.remove(&key).unwrap();
             self.callbacks_to_run.push((callback_id, Js::Undefined));
         }
@@ -316,8 +340,7 @@ impl Runtime {
         }
     }
 
-    fn process_epoll_events(&mut self) {
-        while let Ok(event_id) = self.epoll_reciever.try_recv() {
+    fn process_epoll_events(&mut self, event_id: usize) {
             let id = self
                 .epoll_event_cb_map
                 .get(&(event_id as i64))
@@ -327,18 +350,15 @@ impl Runtime {
 
             self.callbacks_to_run.push((callback_id, Js::Undefined));
             self.epoll_pending_events -= 1;
-        }
     }
 
-    fn process_threadpool_events(&mut self) {
-        while let Ok((thread_id, callback_id, data)) = self.threadp_reciever.try_recv() {
+    fn process_threadpool_events(&mut self, thread_id: usize, callback_id: usize, data: Js) {
             self.callbacks_to_run.push((callback_id, data));
-            self.available.push(thread_id);
-        }
+            self.available_threads.push(thread_id);
     }
 
     fn schedule(&mut self) -> usize {
-        match self.available.pop() {
+        match self.available_threads.pop() {
             Some(thread_id) => thread_id,
             // We would normally queue this
             None => panic!("Out of threads."),
