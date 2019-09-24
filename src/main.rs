@@ -95,7 +95,7 @@ use std::time::{Duration, Instant};
 
 use minimio;
 
-const DEFAULT_TIMEOUT_MS = 50;
+const DEFAULT_TIMEOUT_MS: i32 = 50;
 static mut RUNTIME: usize = 0;
 
 
@@ -212,7 +212,7 @@ impl Runtime {
             .spawn(move || {
                 let mut events = minimio::Events::with_capacity(1024);
                 loop {
-                    match poll.poll(&mut events) {
+                    match poll.poll(&mut events, Some(DEFAULT_TIMEOUT_MS)) {
                         Ok(v) if v > 0 => {
                             for i in 0..v {
                                 let event = events.get_mut(i).expect("No events in event list.");
@@ -221,9 +221,7 @@ impl Runtime {
                                 event_sender.send(event).unwrap();
                             }
                         },
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {
-                            event_sender.send(PollEvent::Timeout).unwrap();
-                        }
+                        Ok(v) if v == 0 => event_sender.send(PollEvent::Timeout).unwrap(),
                         Err(e) => panic!("{:?}", e),
                         _ => (),
                     }
@@ -290,9 +288,22 @@ impl Runtime {
             // timeout to our epoll queue. Then we block the loop while waiting
             // for an event to happen or a timeout to expire.
 
+            // First we need to check if we have any outstanding events at all
+            // and if not we're finished. If not we will loop forever.
+
+            
+            if self.pending_events == 0 {
+                break;
+            }
+
+            let next_timer = self.get_next_timer().map(|instant| {
+                let time_to_next_timeout = instant - Instant::now();
+                time_to_next_timeout.as_millis()
+            });
+            
             for event in self.event_reciever.recv() {
                 match event {
-                    PollEvent::Timeout => (),
+                    PollEvent::Timeout => (),//println!("TIMEOUT"),
                     PollEvent::Threadpool((thread_id, callback_id, data)) => {
                         self.process_threadpool_events(thread_id, callback_id, data);
                     },
@@ -330,6 +341,10 @@ impl Runtime {
             let callback_id = self.timers.remove(&key).unwrap();
             self.callbacks_to_run.push((callback_id, Js::Undefined));
         }
+    }
+
+    fn get_next_timer(&self) -> Option<Instant> {
+        self.timers.iter().nth(0).map(|(k, _)| *k)
     }
 
     fn run_callbacks(&mut self) {
