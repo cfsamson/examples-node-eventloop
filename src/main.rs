@@ -21,10 +21,7 @@ fn javascript() {
     set_timeout(0, |_res| {
         print("Immediate2 timed out");
     });
-    print("Registering immediate timeout 3");
-    set_timeout(0, |_res| {
-        print("Immediate3 timed out");
-    });
+
     // let's read the file again and display the text
     print("Second call to read test.txt");
     Fs::read("test.txt", |result| {
@@ -88,16 +85,16 @@ fn main() {
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use minimio;
 
-const DEFAULT_TIMEOUT_MS: i32 = 50;
+const DEFAULT_TIMEOUT_MS: Option<i32> = None;
 static mut RUNTIME: usize = 0;
-
 
 struct Event {
     task: Box<dyn Fn() -> Js + Send + 'static>,
@@ -152,17 +149,33 @@ struct NodeThread {
 }
 
 pub struct Runtime {
+    /// Available threads for the threadpool
     available_threads: Vec<usize>,
+    /// Callbacks scheduled to run
     callbacks_to_run: Vec<(usize, Js)>,
+    /// All registered callbacks
     callback_queue: HashMap<usize, Box<dyn FnOnce(Js)>>,
+    /// Maps an epoll event to a callback
     epoll_event_cb_map: HashMap<i64, usize>,
+    /// Number of pending epoll events, only used by us to print for this example
     epoll_pending_events: usize,
+    /// Our event registrator which registers interest in events with the OS
     epoll_registrator: minimio::Registrator,
+    /// None = infinite, Some(...) = timeout in ms, Some(0) = immidiate
+    epoll_timeout: Arc<Mutex<Option<i32>>>,
+    /// Channel used by both our threadpool and our epoll thread to send events
+    /// to the main loop
     event_reciever: Receiver<PollEvent>,
+    /// Creates an unique identity for our callbacks
     identity_token: usize,
+    /// The number of events pending. When this is zero, we're done
     pending_events: usize,
+    /// Handles to our threads in the threadpool
     thread_pool: Box<[NodeThread]>,
+    /// Holds all our timers, and an Id for the callback to run once they expire
     timers: BTreeMap<Instant, usize>,
+    /// A struct to temporarely hold timers to remove. We let Runtinme have
+    /// ownership so we can reuse the same memory
     timers_to_remove: Vec<Instant>,
 }
 
@@ -171,7 +184,6 @@ enum PollEvent {
     Epoll(usize),
     Timeout,
 }
-
 
 impl Runtime {
     pub fn new() -> Self {
@@ -207,12 +219,18 @@ impl Runtime {
         // let (epoll_sender, epoll_reciever) = channel::<usize>();
         let mut poll = minimio::Poll::new().expect("Error creating epoll queue");
         let registrator = poll.registrator();
+        let epoll_timeout = Arc::new(Mutex::new(DEFAULT_TIMEOUT_MS));
+        let epoll_timeout_clone = epoll_timeout.clone();
         thread::Builder::new()
             .name("epoll".to_string())
             .spawn(move || {
                 let mut events = minimio::Events::with_capacity(1024);
                 loop {
-                    match poll.poll(&mut events, Some(DEFAULT_TIMEOUT_MS)) {
+                    let epoll_timeout_handle = epoll_timeout_clone.lock().unwrap();
+                    let timeout = *epoll_timeout_handle;
+                    drop(epoll_timeout_handle);
+
+                    match poll.poll(&mut events, timeout) {
                         Ok(v) if v > 0 => {
                             for i in 0..v {
                                 let event = events.get_mut(i).expect("No events in event list.");
@@ -220,7 +238,7 @@ impl Runtime {
                                 let event = PollEvent::Epoll(event.id().value() as usize);
                                 event_sender.send(event).unwrap();
                             }
-                        },
+                        }
                         Ok(v) if v == 0 => event_sender.send(PollEvent::Timeout).unwrap(),
                         Err(e) => panic!("{:?}", e),
                         _ => (),
@@ -236,6 +254,7 @@ impl Runtime {
             epoll_event_cb_map: HashMap::new(),
             epoll_pending_events: 0,
             epoll_registrator: registrator,
+            epoll_timeout,
             event_reciever,
             identity_token: 0,
             pending_events: 0,
@@ -245,19 +264,19 @@ impl Runtime {
         }
     }
 
-    /// This is the event loop. There are several things we could do here to 
-    /// make it a better implementation. One is to set a max backlog of callbacks 
-    /// to execute in a single tick, so we don't starve the threadpool or file 
-    /// handlers. Another is to dynamically decide if/and how long the thread 
-    /// could be allowed to be parked for example by looking at the backlog of 
-    /// events, and if there is any backlog disable it. Some of our Vec's will 
+    /// This is the event loop. There are several things we could do here to
+    /// make it a better implementation. One is to set a max backlog of callbacks
+    /// to execute in a single tick, so we don't starve the threadpool or file
+    /// handlers. Another is to dynamically decide if/and how long the thread
+    /// could be allowed to be parked for example by looking at the backlog of
+    /// events, and if there is any backlog disable it. Some of our Vec's will
     /// only grow, and not resize, so if we have a period of very high load, the
     /// memory will stay higher than we need until a restart. This could be
     /// dealt by using a different kind of data structure like a `LinkedList`.
     pub fn run(&mut self, f: impl Fn()) {
         let rt_ptr: *mut Runtime = self;
         unsafe { RUNTIME = rt_ptr as usize };
-        let mut ticks = 0; // just for us priting out
+        let mut ticks = 0; // just for us priting out during execution
 
         // First we run our "main" function
         f();
@@ -283,30 +302,28 @@ impl Runtime {
             // we won't use this
 
             // ===== 4. POLL =====
-            // NB! Timeout! Normally we set these "blocking" polls to time out
-            // when we calculate the next timer to expire, we set that as the
-            // timeout to our epoll queue. Then we block the loop while waiting
-            // for an event to happen or a timeout to expire.
-
             // First we need to check if we have any outstanding events at all
-            // and if not we're finished. If not we will loop forever.
-
-            
+            // and if not we're finished. If not we will wait forever.
             if self.pending_events == 0 {
                 break;
             }
 
-            let next_timer = self.get_next_timer().map(|instant| {
-                let time_to_next_timeout = instant - Instant::now();
-                time_to_next_timeout.as_millis()
-            });
-            
-            for event in self.event_reciever.recv() {
+            // We want to get the time to the next timeout (if any) and we
+            // set the timeout of our epoll wait to the same as the timeout
+            // for the next timer. If there is none, we set it to infinite (None)
+            let next_timeout = self.get_next_timer();
+
+            // We release the lock before we wait
+            let mut epoll_timeout_lock = self.epoll_timeout.lock().unwrap();
+            *epoll_timeout_lock = next_timeout;
+            drop(epoll_timeout_lock);
+
+            if let Ok(event) = self.event_reciever.recv() {
                 match event {
-                    PollEvent::Timeout => (),//println!("TIMEOUT"),
+                    PollEvent::Timeout => (),
                     PollEvent::Threadpool((thread_id, callback_id, data)) => {
                         self.process_threadpool_events(thread_id, callback_id, data);
-                    },
+                    }
                     PollEvent::Epoll(event_id) => {
                         self.process_epoll_events(event_id);
                     }
@@ -315,16 +332,13 @@ impl Runtime {
             self.run_callbacks();
 
             // ===== 5. CHECK =====
-            // an set immidiate function could be added pretty easily but we 
+            // an set immidiate function could be added pretty easily but we
             // won't do that here
 
             // ===== 6. CLOSE CALLBACKS ======
             // Release resources, we won't do that here, but this is typically
             // where sockets etc are closed.
 
-            // Let the OS have a time slice of our thread so we don't busy loop
-            // this could be dynamically set depending on requirements or load.
-            //thread::park_timeout(std::time::Duration::from_millis(1));
         }
         print("FINISHED");
     }
@@ -333,7 +347,7 @@ impl Runtime {
         // Need an intermediate variable to please the borrowchecker
         let timers_to_remove = &mut self.timers_to_remove;
 
-        &self.timers
+        self.timers
             .range(..=Instant::now())
             .for_each(|(k, _)| timers_to_remove.push(*k));
 
@@ -343,8 +357,14 @@ impl Runtime {
         }
     }
 
-    fn get_next_timer(&self) -> Option<Instant> {
-        self.timers.iter().nth(0).map(|(k, _)| *k)
+    fn get_next_timer(&self) -> Option<i32> {
+        self.timers.iter().nth(0).map(|(&instant, _)| {
+            let mut time_to_next_timeout = instant - Instant::now();
+            if time_to_next_timeout < Duration::new(0, 0) {
+                time_to_next_timeout = Duration::new(0, 0);
+            }
+            time_to_next_timeout.as_millis() as i32
+        })
     }
 
     fn run_callbacks(&mut self) {
@@ -356,20 +376,20 @@ impl Runtime {
     }
 
     fn process_epoll_events(&mut self, event_id: usize) {
-            let id = self
-                .epoll_event_cb_map
-                .get(&(event_id as i64))
-                .expect("Event not in event map.");
-            let callback_id = *id;
-            self.epoll_event_cb_map.remove(&(event_id as i64));
+        let id = self
+            .epoll_event_cb_map
+            .get(&(event_id as i64))
+            .expect("Event not in event map.");
+        let callback_id = *id;
+        self.epoll_event_cb_map.remove(&(event_id as i64));
 
-            self.callbacks_to_run.push((callback_id, Js::Undefined));
-            self.epoll_pending_events -= 1;
+        self.callbacks_to_run.push((callback_id, Js::Undefined));
+        self.epoll_pending_events -= 1;
     }
 
     fn process_threadpool_events(&mut self, thread_id: usize, callback_id: usize, data: Js) {
-            self.callbacks_to_run.push((callback_id, data));
-            self.available_threads.push(thread_id);
+        self.callbacks_to_run.push((callback_id, data));
+        self.available_threads.push(thread_id);
     }
 
     fn schedule(&mut self) -> usize {
