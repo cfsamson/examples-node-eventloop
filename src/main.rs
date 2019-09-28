@@ -211,9 +211,9 @@ impl Runtime {
                 .name(format!("pool{}", i))
                 .spawn(move || {
                     while let Ok(event) = evt_reciever.recv() {
+                        print(format!("recived a task of type: {}", event.kind));
                         // check if we're closing the loop
                         if let EventKind::Close = event.kind { break };
-                        print(format!("recived a task of type: {}", event.kind));
                         let res = (event.task)();
                         print(format!("finished running a task of type: {}.", event.kind));
                         let event = PollEvent::Threadpool((i, event.callback_id, res));
@@ -256,8 +256,14 @@ impl Runtime {
                                 event_sender.send(event).unwrap();
                             }
                         }
-                        Ok(v) if v == 0 => event_sender.send(PollEvent::Timeout).unwrap(),
-                        Err(ref e) if e.kind() == io::ErrorKind::Interrupted => break,
+                        Ok(v) if v == 0 => {
+                            print("epoll event timeout is ready");
+                            event_sender.send(PollEvent::Timeout).unwrap()
+                        },
+                        Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
+                            print("recieved event of type: Close");
+                            break
+                        },
                         Err(e) => panic!("{:?}", e),
                         _ => (),
                     }
