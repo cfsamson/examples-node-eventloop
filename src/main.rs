@@ -160,7 +160,7 @@ pub struct Runtime {
     epoll_registrator: minimio::Registrator,
     // The handle to our epoll thread
     epoll_thread: thread::JoinHandle<()>,
-    /// None = infinite, Some(...) = timeout in ms, Some(0) = immidiate
+    /// None = infinite, Some(n) = timeout in n ms, Some(0) = immidiate
     epoll_timeout: Arc<Mutex<Option<i32>>>,
     /// Channel used by both our threadpool and our epoll thread to send events
     /// to the main loop
