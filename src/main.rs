@@ -154,11 +154,15 @@ impl Js {
     }
 }
 
+/// NodeTheread represents a thread in our threadpool. Each event has a Joinhandle
+/// and a transmitter part of a channel which is used to inform our main loop
+/// about what events has occurred.
 #[derive(Debug)]
 struct NodeThread {
-    pub handle: JoinHandle<()>,
+    pub(crate) handle: JoinHandle<()>,
     sender: Sender<Event>,
 }
+
 
 pub struct Runtime {
     /// Available threads for the threadpool
@@ -193,6 +197,7 @@ pub struct Runtime {
     timers_to_remove: Vec<Instant>,
 }
 
+/// Describes the three main events our eventloop handles
 enum PollEvent {
     Threadpool((usize, usize, Js)),
     Epoll(usize),
@@ -233,8 +238,6 @@ impl Runtime {
         }
 
         // ===== EPOLL THREAD =====
-        // Only wakes up when there is a task ready
-        // let (epoll_sender, epoll_reciever) = channel::<usize>();
         let mut poll = minimio::Poll::new().expect("Error creating epoll queue");
         let registrator = poll.registrator();
         let epoll_timeout = Arc::new(Mutex::new(DEFAULT_TIMEOUT_MS));
@@ -343,6 +346,9 @@ impl Runtime {
             *epoll_timeout_lock = next_timeout;
             drop(epoll_timeout_lock);
 
+            // We handle one and one event but multiple events could be returned
+            // on the same poll. We won't cover that here though but there are
+            // several ways of handling this. 
             if let Ok(event) = self.event_reciever.recv() {
                 match event {
                     PollEvent::Timeout => (),
@@ -366,8 +372,7 @@ impl Runtime {
 
         }
 
-        // We clean up our resources, makes sure all destructors runs. This is
-        // just good practice.
+        // We clean up our resources, makes sure all destructors runs.
         for thread in self.thread_pool.into_iter() {
             thread.sender.send(Event::close()).unwrap();
             thread.handle.join().unwrap();
@@ -426,7 +431,7 @@ impl Runtime {
         self.available_threads.push(thread_id);
     }
 
-    fn schedule(&mut self) -> usize {
+    fn get_available_thread(&mut self) -> usize {
         match self.available_threads.pop() {
             Some(thread_id) => thread_id,
             // We would normally queue this
@@ -491,7 +496,7 @@ impl Runtime {
         };
 
         // we are not going to implement a real scheduler here, just a LIFO queue
-        let available = self.schedule();
+        let available = self.get_available_thread();
         self.thread_pool[available].sender.send(event).unwrap();
         self.pending_events += 1;
     }
