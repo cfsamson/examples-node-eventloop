@@ -214,8 +214,10 @@ impl Runtime {
                         print(format!("recived a task of type: {}", event.kind));
                         // check if we're closing the loop
                         if let EventKind::Close = event.kind { break };
+
                         let res = (event.task)();
                         print(format!("finished running a task of type: {}.", event.kind));
+
                         let event = PollEvent::Threadpool((i, event.callback_id, res));
                         event_sender.send(event).unwrap();
                     }
@@ -309,14 +311,12 @@ impl Runtime {
         // ===== EVENT LOOP =====
         while self.pending_events > 0 {
             ticks += 1;
+            // NOT PART OF LOOP, JUST FOR US TO SEE WHAT TICK IS EXCECUTING
+            print(format!("===== TICK {} =====", ticks));
+
 
             // ===== 2. TIMERS =====
             self.process_expired_timers();
-
-            // NOT PART OF LOOP, JUST FOR US TO SEE WHAT TICK IS EXCECUTING
-            if !self.callbacks_to_run.is_empty() {
-                print(format!("===== TICK {} =====", ticks));
-            }
 
             // ===== 2. CALLBACKS =====
             // Timer callbacks and if for some reason we have postponed callbacks
@@ -545,7 +545,7 @@ impl Fs {
         let work = move || {
             // Let's simulate that there is a very large file we're reading allowing us to actually
             // observe how the code is executed
-            thread::sleep(std::time::Duration::from_secs(2));
+            thread::sleep(std::time::Duration::from_secs(1));
             let mut buffer = String::new();
             fs::File::open(&path)
                 .unwrap()
