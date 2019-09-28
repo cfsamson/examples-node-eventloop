@@ -85,7 +85,7 @@ fn main() {
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -102,9 +102,20 @@ struct Event {
     kind: EventKind,
 }
 
+impl Event {
+    fn close() -> Self {
+        Event {
+            task: Box::new(|| Js::Undefined),
+            callback_id: 0,
+            kind: EventKind::Close,
+        }
+    }
+}
+
 pub enum EventKind {
     FileRead,
     Encrypt,
+    Close,
 }
 
 impl fmt::Display for EventKind {
@@ -113,6 +124,7 @@ impl fmt::Display for EventKind {
         match self {
             FileRead => write!(f, "File read"),
             Encrypt => write!(f, "Encrypt"),
+            Close => write!(f, "Close"),
         }
     }
 }
@@ -144,7 +156,7 @@ impl Js {
 
 #[derive(Debug)]
 struct NodeThread {
-    handle: JoinHandle<()>,
+    pub handle: JoinHandle<()>,
     sender: Sender<Event>,
 }
 
@@ -161,6 +173,8 @@ pub struct Runtime {
     epoll_pending_events: usize,
     /// Our event registrator which registers interest in events with the OS
     epoll_registrator: minimio::Registrator,
+    // The handle to our epoll thread
+    epoll_thread: thread::JoinHandle<()>,
     /// None = infinite, Some(...) = timeout in ms, Some(0) = immidiate
     epoll_timeout: Arc<Mutex<Option<i32>>>,
     /// Channel used by both our threadpool and our epoll thread to send events
@@ -171,7 +185,7 @@ pub struct Runtime {
     /// The number of events pending. When this is zero, we're done
     pending_events: usize,
     /// Handles to our threads in the threadpool
-    thread_pool: Box<[NodeThread]>,
+    thread_pool: Vec<NodeThread>,
     /// Holds all our timers, and an Id for the callback to run once they expire
     timers: BTreeMap<Instant, usize>,
     /// A struct to temporarely hold timers to remove. We let Runtinme have
@@ -197,6 +211,8 @@ impl Runtime {
                 .name(format!("pool{}", i))
                 .spawn(move || {
                     while let Ok(event) = evt_reciever.recv() {
+                        // check if we're closing the loop
+                        if let EventKind::Close = event.kind { break };
                         print(format!("recived a task of type: {}", event.kind));
                         let res = (event.task)();
                         print(format!("finished running a task of type: {}.", event.kind));
@@ -221,7 +237,8 @@ impl Runtime {
         let registrator = poll.registrator();
         let epoll_timeout = Arc::new(Mutex::new(DEFAULT_TIMEOUT_MS));
         let epoll_timeout_clone = epoll_timeout.clone();
-        thread::Builder::new()
+
+        let epoll_thread = thread::Builder::new()
             .name("epoll".to_string())
             .spawn(move || {
                 let mut events = minimio::Events::with_capacity(1024);
@@ -240,6 +257,7 @@ impl Runtime {
                             }
                         }
                         Ok(v) if v == 0 => event_sender.send(PollEvent::Timeout).unwrap(),
+                        Err(ref e) if e.kind() == io::ErrorKind::Interrupted => break,
                         Err(e) => panic!("{:?}", e),
                         _ => (),
                     }
@@ -254,11 +272,12 @@ impl Runtime {
             epoll_event_cb_map: HashMap::new(),
             epoll_pending_events: 0,
             epoll_registrator: registrator,
+            epoll_thread,
             epoll_timeout,
             event_reciever,
             identity_token: 0,
             pending_events: 0,
-            thread_pool: threads.into_boxed_slice(),
+            thread_pool: threads,
             timers: BTreeMap::new(),
             timers_to_remove: vec![],
         }
@@ -273,8 +292,8 @@ impl Runtime {
     /// only grow, and not resize, so if we have a period of very high load, the
     /// memory will stay higher than we need until a restart. This could be
     /// dealt by using a different kind of data structure like a `LinkedList`.
-    pub fn run(&mut self, f: impl Fn()) {
-        let rt_ptr: *mut Runtime = self;
+    pub fn run(mut self, f: impl Fn()) {
+        let rt_ptr: *mut Runtime = &mut self;
         unsafe { RUNTIME = rt_ptr as usize };
         let mut ticks = 0; // just for us priting out during execution
 
@@ -340,6 +359,15 @@ impl Runtime {
             // where sockets etc are closed.
 
         }
+
+        // We clean up our resources, makes sure all destructors runs. This is
+        // just good practice.
+        for thread in self.thread_pool.into_iter() {
+            thread.sender.send(Event::close()).unwrap();
+            thread.handle.join().unwrap();
+        }
+        self.epoll_registrator.close_loop().unwrap();
+        self.epoll_thread.join().unwrap();
         print("FINISHED");
     }
 
@@ -548,15 +576,17 @@ impl Io {
 
         let token = rt.generate_cb_identity();
         rt.epoll_registrator
-            .register(&mut stream, token, minimio::Interests::readable())
+            .register(&stream, token, minimio::Interests::readable())
             .unwrap();
 
         let wrapped = move |_n| {
             let mut stream = stream;
-            // we do this to prevent getting an error if the status somehow changes between the epoll
-            // and our read. In a real implementation this should be handled by re-register the event
-            // to the epoll queue for example or just accept that there might be a very small amount
-            // of blocking happening here (it might even be more costly to re-register the task)
+            // we do this to prevent getting an error if the status somehow 
+            // changes between the epoll and our read. In a real implementation
+            // this should be handled by re-register the event to the epoll 
+            // queue for example or just accept that there might be a very small
+            // amount of blocking happening here (it might even be more costly
+            // to re-register the task)
             let mut buffer = String::new();
             stream
                 .read_to_string(&mut buffer)
