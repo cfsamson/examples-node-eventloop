@@ -29,7 +29,7 @@ fn javascript() {
         let len = text.len();
         print(format!("Second count: {} characters.", len));
 
-        // aaand one more time but not in parallell.
+        // aaand one more time but not in parallel.
         print("Third call to read test.txt");
         Fs::read("test.txt", |result| {
             let text = result.into_string().unwrap();
@@ -58,26 +58,8 @@ fn javascript() {
     });
 }
 
-fn print(t: impl std::fmt::Display) {
-    println!("Thread: {}\t {}", current(), t);
-}
-
-fn print_content(t: impl std::fmt::Display, descr: &str) {
-    println!(
-        "\n===== THREAD {} START CONTENT - {} =====",
-        current(),
-        descr.to_uppercase()
-    );
-    println!("{}", t);
-    println!("===== END CONTENT =====\n");
-}
-
-fn current() -> String {
-    thread::current().name().unwrap().to_string()
-}
-
 fn main() {
-    let mut rt = Runtime::new();
+    let rt = Runtime::new();
     rt.run(javascript);
 }
 
@@ -163,7 +145,6 @@ struct NodeThread {
     sender: Sender<Event>,
 }
 
-
 pub struct Runtime {
     /// Available threads for the threadpool
     available_threads: Vec<usize>,
@@ -218,7 +199,9 @@ impl Runtime {
                     while let Ok(event) = evt_reciever.recv() {
                         print(format!("recived a task of type: {}", event.kind));
                         // check if we're closing the loop
-                        if let EventKind::Close = event.kind { break };
+                        if let EventKind::Close = event.kind {
+                            break;
+                        };
 
                         let res = (event.task)();
                         print(format!("finished running a task of type: {}.", event.kind));
@@ -264,11 +247,11 @@ impl Runtime {
                         Ok(v) if v == 0 => {
                             print("epoll event timeout is ready");
                             event_sender.send(PollEvent::Timeout).unwrap()
-                        },
+                        }
                         Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
                             print("recieved event of type: Close");
-                            break
-                        },
+                            break;
+                        }
                         Err(e) => panic!("{:?}", e),
                         _ => (),
                     }
@@ -317,7 +300,6 @@ impl Runtime {
             // NOT PART OF LOOP, JUST FOR US TO SEE WHAT TICK IS EXCECUTING
             print(format!("===== TICK {} =====", ticks));
 
-
             // ===== 2. TIMERS =====
             self.process_expired_timers();
 
@@ -348,7 +330,7 @@ impl Runtime {
 
             // We handle one and one event but multiple events could be returned
             // on the same poll. We won't cover that here though but there are
-            // several ways of handling this. 
+            // several ways of handling this.
             if let Ok(event) = self.event_reciever.recv() {
                 match event {
                     PollEvent::Timeout => (),
@@ -369,7 +351,6 @@ impl Runtime {
             // ===== 6. CLOSE CALLBACKS ======
             // Release resources, we won't do that here, but this is typically
             // where sockets etc are closed.
-
         }
 
         // We clean up our resources, makes sure all destructors runs.
@@ -419,6 +400,7 @@ impl Runtime {
             .epoll_event_cb_map
             .get(&(event_id as i64))
             .expect("Event not in event map.");
+            
         let callback_id = *id;
         self.epoll_event_cb_map.remove(&(event_id as i64));
 
@@ -434,7 +416,7 @@ impl Runtime {
     fn get_available_thread(&mut self) -> usize {
         match self.available_threads.pop() {
             Some(thread_id) => thread_id,
-            // We would normally queue this
+            // We would normally return None and the request and not panic!
             None => panic!("Out of threads."),
         }
     }
@@ -563,8 +545,6 @@ impl Fs {
     }
 }
 
-// ===== THIS IS OUR EPOLL/KQUEUE/IOCP LIBRARY =====
-
 struct Io;
 impl Io {
     pub fn http_get_slow(url: &str, delay_ms: u32, cb: impl Fn(Js) + 'static + Clone) {
@@ -587,24 +567,35 @@ impl Io {
 
         let token = rt.generate_cb_identity();
         rt.epoll_registrator
-            .register(&stream, token, minimio::Interests::readable())
+            .register(&mut stream, token, minimio::Interests::readable())
             .unwrap();
 
         let wrapped = move |_n| {
             let mut stream = stream;
-            // we do this to prevent getting an error if the status somehow 
-            // changes between the epoll and our read. In a real implementation
-            // this should be handled by re-register the event to the epoll 
-            // queue for example or just accept that there might be a very small
-            // amount of blocking happening here (it might even be more costly
-            // to re-register the task)
             let mut buffer = String::new();
-            stream
-                .read_to_string(&mut buffer)
-                .expect("Error reading from stream.");
+            stream.read_to_string(&mut buffer).expect("Stream read error");
+
             cb(Js::String(buffer));
         };
 
         rt.register_io(token, wrapped);
     }
+}
+
+fn print(t: impl std::fmt::Display) {
+    println!("Thread: {}\t {}", current(), t);
+}
+
+fn print_content(t: impl std::fmt::Display, descr: &str) {
+    println!(
+        "\n===== THREAD {} START CONTENT - {} =====",
+        current(),
+        descr.to_uppercase()
+    );
+    println!("{}", t);
+    println!("===== END CONTENT =====\n");
+}
+
+fn current() -> String {
+    thread::current().name().unwrap().to_string()
 }
