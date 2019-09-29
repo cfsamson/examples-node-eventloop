@@ -4,13 +4,13 @@
 name = "js_event_loop"
 version = "0.1.0"
 dependencies = [
- "minimio 0.1.0 (git+https://github.com/cfsamson/examples-io-eventloop?branch=win_close_err)",
+ "minimio 0.1.0 (git+https://github.com/cfsamson/examples-io-eventloop)",
 ]
 
 [[package]]
 name = "minimio"
 version = "0.1.0"
-source = "git+https://github.com/cfsamson/examples-io-eventloop?branch=win_close_err#6b3bb8a60f5575d6f9c6bae3c19dd5418e1955f9"
+source = "git+https://github.com/cfsamson/examples-io-eventloop#166f0842fe182f7c9c9a34e23f0db2727f57ebfb"
 
 [metadata]
-"checksum minimio 0.1.0 (git+https://github.com/cfsamson/examples-io-eventloop?branch=win_close_err)" = "<none>"
+"checksum minimio 0.1.0 (git+https://github.com/cfsamson/examples-io-eventloop)" = "<none>"

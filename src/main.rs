@@ -56,12 +56,6 @@ fn javascript() {
         let result = result.into_string().unwrap();
         print_content(result.trim(), "web call");
     });   
-    // `http_get_slow` let's us define a latency we want to simulate
-    print("Registering http get request to mozilla.org");
-    Http::http_get_slow("http//www.mozilla.org", 1000, |result| {
-        let result = result.into_string().unwrap();
-        print_content(result.trim(), "web call");
-    });
 }
 
 fn main() {
