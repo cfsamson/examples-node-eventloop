@@ -81,13 +81,12 @@ use std::time::{Duration, Instant};
 
 use minimio;
 
-const DEFAULT_TIMEOUT_MS: Option<i32> = None;
-static mut RUNTIME: usize = 0;
+static mut RUNTIME: *mut Runtime = std::ptr::null_mut();
 
 struct Event {
     task: Box<dyn Fn() -> Js + Send + 'static>,
     callback_id: usize,
-    kind: EventKind,
+    kind: ThreadPoolEventKind,
 }
 
 impl Event {
@@ -95,20 +94,20 @@ impl Event {
         Event {
             task: Box::new(|| Js::Undefined),
             callback_id: 0,
-            kind: EventKind::Close,
+            kind: ThreadPoolEventKind::Close,
         }
     }
 }
 
-pub enum EventKind {
+pub enum ThreadPoolEventKind {
     FileRead,
     Encrypt,
     Close,
 }
 
-impl fmt::Display for EventKind {
+impl fmt::Display for ThreadPoolEventKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use EventKind::*;
+        use ThreadPoolEventKind::*;
         match self {
             FileRead => write!(f, "File read"),
             Encrypt => write!(f, "Encrypt"),
@@ -184,9 +183,14 @@ pub struct Runtime {
     timers_to_remove: Vec<Instant>,
 }
 
-/// Describes the three main events our eventloop handles
+/// Describes the three main events our epoll-eventloop handles
 enum PollEvent {
+    /// An event from the `threadpool` with a tuple containing the `thread id`,
+    /// the `callback_id` and the data which the we expect to process in our
+    /// callback 
     Threadpool((usize, usize, Js)),
+    /// An event from the epoll-based eventloop holding the `event_id` for the
+    /// event
     Epoll(usize),
     Timeout,
 }
@@ -205,7 +209,7 @@ impl Runtime {
                     while let Ok(event) = evt_reciever.recv() {
                         print(format!("recived a task of type: {}", event.kind));
                         // check if we're closing the loop
-                        if let EventKind::Close = event.kind {
+                        if let ThreadPoolEventKind::Close = event.kind {
                             break;
                         };
 
@@ -229,7 +233,7 @@ impl Runtime {
         // ===== EPOLL THREAD =====
         let mut poll = minimio::Poll::new().expect("Error creating epoll queue");
         let registrator = poll.registrator();
-        let epoll_timeout = Arc::new(Mutex::new(DEFAULT_TIMEOUT_MS));
+        let epoll_timeout = Arc::new(Mutex::new(None));
         let epoll_timeout_clone = epoll_timeout.clone();
 
         let epoll_thread = thread::Builder::new()
@@ -295,7 +299,7 @@ impl Runtime {
     /// dealt by using a different kind of data structure like a `LinkedList`.
     pub fn run(mut self, f: impl Fn()) {
         let rt_ptr: *mut Runtime = &mut self;
-        unsafe { RUNTIME = rt_ptr as usize };
+        unsafe { RUNTIME = rt_ptr };
         let mut ticks = 0; // just for us priting out during execution
 
         // First we run our "main" function
@@ -365,7 +369,7 @@ impl Runtime {
             thread.sender.send(Event::close()).expect("threadpool cleanup");
             thread.handle.join().unwrap();
         }
-        // self.epoll_registrator.close_loop().unwrap();
+        self.epoll_registrator.close_loop().unwrap();
         self.epoll_thread.join().unwrap();
         print("FINISHED");
     }
@@ -471,7 +475,7 @@ impl Runtime {
     pub fn register_work(
         &mut self,
         task: impl Fn() -> Js + Send + 'static,
-        kind: EventKind,
+        kind: ThreadPoolEventKind,
         cb: impl FnOnce(Js) + 'static,
     ) {
         let callback_id = self.generate_cb_identity();
@@ -527,8 +531,8 @@ impl Crypto {
             Js::Int(fib)
         };
 
-        let rt = unsafe { &mut *(RUNTIME as *mut Runtime) };
-        rt.register_work(work, EventKind::Encrypt, cb);
+        let rt = unsafe { &mut *RUNTIME };
+        rt.register_work(work, ThreadPoolEventKind::Encrypt, cb);
     }
 }
 
@@ -546,15 +550,15 @@ impl Fs {
                 .unwrap();
             Js::String(buffer)
         };
-        let rt = unsafe { &mut *(RUNTIME as *mut Runtime) };
-        rt.register_work(work, EventKind::FileRead, cb);
+        let rt = unsafe { &mut *RUNTIME };
+        rt.register_work(work, ThreadPoolEventKind::FileRead, cb);
     }
 }
 
 struct Io;
 impl Io {
     pub fn http_get_slow(url: &str, delay_ms: u32, cb: impl Fn(Js) + 'static + Clone) {
-        let rt: &mut Runtime = unsafe { &mut *(RUNTIME as *mut Runtime) };
+        let rt: &mut Runtime = unsafe { &mut *RUNTIME };
         // Don't worry, http://slowwly.robertomurray.co.uk is a site for simulating a delayed
         // response from a server. Perfect for our use case.
         let mut stream: minimio::TcpStream =
