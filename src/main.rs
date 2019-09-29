@@ -56,6 +56,14 @@ fn javascript() {
         let result = result.into_string().unwrap();
         print_content(result.trim(), "web call");
     });
+
+     // `http_get_slow` let's us define a latency we want to simulate
+    print("Registering http get request to mozilla.org");
+    Io::http_get_slow("http//www.mozilla.org", 0, |result| {
+        let result = result.into_string().unwrap();
+        print_content(result.trim(), "web call");
+    });
+   
 }
 
 fn main() {
@@ -400,7 +408,6 @@ impl Runtime {
             .epoll_event_cb_map
             .get(&(event_id as i64))
             .expect("Event not in event map.");
-            
         let callback_id = *id;
         self.epoll_event_cb_map.remove(&(event_id as i64));
 
@@ -573,7 +580,9 @@ impl Io {
         let wrapped = move |_n| {
             let mut stream = stream;
             let mut buffer = String::new();
-            stream.read_to_string(&mut buffer).expect("Stream read error");
+            stream
+                .read_to_string(&mut buffer)
+                .expect("Stream read error");
 
             cb(Js::String(buffer));
         };
@@ -592,7 +601,24 @@ fn print_content(t: impl std::fmt::Display, descr: &str) {
         current(),
         descr.to_uppercase()
     );
-    println!("{}", t);
+
+    let content = format!("{}", t); 
+    let lines = content.lines().take(2);
+    let main_cont: String = lines.map(|l| format!("{}\n", l)).collect();
+    let opt_location = content.find("Location");
+    let opt_location = opt_location.map(|loc| {
+        content[loc..]
+        .lines()
+        .nth(0)
+        .map(|l| format!("{}\n",l))
+        .unwrap_or(String::new())
+    });    
+
+    println!(
+        "{}{}... [Note: Abbreviated for display] ...",
+        main_cont,
+        opt_location.unwrap_or(String::new())
+    );
     println!("===== END CONTENT =====\n");
 }
 
