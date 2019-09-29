@@ -52,13 +52,13 @@ fn javascript() {
 
     // `http_get_slow` let's us define a latency we want to simulate
     print("Registering http get request to google.com");
-    Io::http_get_slow("http//www.google.com", 2000, |result| {
+    Http::http_get_slow("http//www.google.com", 2000, |result| {
         let result = result.into_string().unwrap();
         print_content(result.trim(), "web call");
     });   
     // `http_get_slow` let's us define a latency we want to simulate
     print("Registering http get request to mozilla.org");
-    Io::http_get_slow("http//www.mozilla.org", 1000, |result| {
+    Http::http_get_slow("http//www.mozilla.org", 1000, |result| {
         let result = result.into_string().unwrap();
         print_content(result.trim(), "web call");
     });
@@ -555,8 +555,8 @@ impl Fs {
     }
 }
 
-struct Io;
-impl Io {
+struct Http;
+impl Http {
     pub fn http_get_slow(url: &str, delay_ms: u32, cb: impl Fn(Js) + 'static + Clone) {
         let rt: &mut Runtime = unsafe { &mut *RUNTIME };
         // Don't worry, http://slowwly.robertomurray.co.uk is a site for simulating a delayed
