@@ -55,15 +55,13 @@ fn javascript() {
     Io::http_get_slow("http//www.google.com", 2000, |result| {
         let result = result.into_string().unwrap();
         print_content(result.trim(), "web call");
-    });
-
-     // `http_get_slow` let's us define a latency we want to simulate
+    });   
+    // `http_get_slow` let's us define a latency we want to simulate
     print("Registering http get request to mozilla.org");
-    Io::http_get_slow("http//www.mozilla.org", 0, |result| {
+    Io::http_get_slow("http//www.mozilla.org", 1000, |result| {
         let result = result.into_string().unwrap();
         print_content(result.trim(), "web call");
     });
-   
 }
 
 fn main() {
@@ -215,7 +213,7 @@ impl Runtime {
                         print(format!("finished running a task of type: {}.", event.kind));
 
                         let event = PollEvent::Threadpool((i, event.callback_id, res));
-                        event_sender.send(event).unwrap();
+                        event_sender.send(event).expect("threadpool");
                     }
                 })
                 .expect("Couldn't initialize thread pool.");
@@ -239,6 +237,7 @@ impl Runtime {
             .spawn(move || {
                 let mut events = minimio::Events::with_capacity(1024);
                 loop {
+                    println!("LOOP");
                     let epoll_timeout_handle = epoll_timeout_clone.lock().unwrap();
                     let timeout = *epoll_timeout_handle;
                     drop(epoll_timeout_handle);
@@ -249,12 +248,12 @@ impl Runtime {
                                 let event = events.get_mut(i).expect("No events in event list.");
                                 print(format!("epoll event {} is ready", event.id().value()));
                                 let event = PollEvent::Epoll(event.id().value() as usize);
-                                event_sender.send(event).unwrap();
+                                event_sender.send(event).expect("epoll event");
                             }
                         }
                         Ok(v) if v == 0 => {
                             print("epoll event timeout is ready");
-                            event_sender.send(PollEvent::Timeout).unwrap()
+                            event_sender.send(PollEvent::Timeout).expect("epoll timeout");
                         }
                         Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
                             print("recieved event of type: Close");
@@ -330,7 +329,7 @@ impl Runtime {
             // set the timeout of our epoll wait to the same as the timeout
             // for the next timer. If there is none, we set it to infinite (None)
             let next_timeout = self.get_next_timer();
-
+            println!("NEXT_TIMEOUT: {:?}", next_timeout);
             // We release the lock before we wait
             let mut epoll_timeout_lock = self.epoll_timeout.lock().unwrap();
             *epoll_timeout_lock = next_timeout;
@@ -363,10 +362,10 @@ impl Runtime {
 
         // We clean up our resources, makes sure all destructors runs.
         for thread in self.thread_pool.into_iter() {
-            thread.sender.send(Event::close()).unwrap();
+            thread.sender.send(Event::close()).expect("threadpool cleanup");
             thread.handle.join().unwrap();
         }
-        self.epoll_registrator.close_loop().unwrap();
+        // self.epoll_registrator.close_loop().unwrap();
         self.epoll_thread.join().unwrap();
         print("FINISHED");
     }
@@ -486,7 +485,7 @@ impl Runtime {
 
         // we are not going to implement a real scheduler here, just a LIFO queue
         let available = self.get_available_thread();
-        self.thread_pool[available].sender.send(event).unwrap();
+        self.thread_pool[available].sender.send(event).expect("register work");
         self.pending_events += 1;
     }
 
@@ -583,7 +582,6 @@ impl Io {
             stream
                 .read_to_string(&mut buffer)
                 .expect("Stream read error");
-
             cb(Js::String(buffer));
         };
 
