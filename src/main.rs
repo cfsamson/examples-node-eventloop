@@ -494,7 +494,7 @@ impl Runtime {
     }
 
     fn set_timeout(&mut self, ms: u64, cb: impl Fn(Js) + 'static) {
-        // Is it theoretically possible to get two equal instants? If so we will have a bug...
+        // Is it theoretically possible to get two equal instants? If so we'll have a bug...
         let now = Instant::now();
         let cb_id = self.generate_cb_identity();
         self.add_callback(cb_id, cb);
