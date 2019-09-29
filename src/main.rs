@@ -194,15 +194,18 @@ impl Runtime {
         // ===== THE REGULAR THREADPOOL =====
         let (event_sender, event_reciever) = channel::<PollEvent>();
         let mut threads = Vec::with_capacity(4);
+
         for i in 0..4 {
             let (evt_sender, evt_reciever) = channel::<Event>();
             let event_sender = event_sender.clone();
+
             let handle = thread::Builder::new()
                 .name(format!("pool{}", i))
                 .spawn(move || {
+
                     while let Ok(event) = evt_reciever.recv() {
                         print(format!("recived a task of type: {}", event.kind));
-                        // check if we're closing the loop
+                        
                         if let ThreadPoolEventKind::Close = event.kind {
                             break;
                         };
@@ -234,8 +237,8 @@ impl Runtime {
             .name("epoll".to_string())
             .spawn(move || {
                 let mut events = minimio::Events::with_capacity(1024);
+                
                 loop {
-                    println!("LOOP");
                     let epoll_timeout_handle = epoll_timeout_clone.lock().unwrap();
                     let timeout = *epoll_timeout_handle;
                     drop(epoll_timeout_handle);
@@ -245,6 +248,7 @@ impl Runtime {
                             for i in 0..v {
                                 let event = events.get_mut(i).expect("No events in event list.");
                                 print(format!("epoll event {} is ready", event.id().value()));
+                                
                                 let event = PollEvent::Epoll(event.id().value() as usize);
                                 event_sender.send(event).expect("epoll event");
                             }
@@ -294,7 +298,9 @@ impl Runtime {
     pub fn run(mut self, f: impl Fn()) {
         let rt_ptr: *mut Runtime = &mut self;
         unsafe { RUNTIME = rt_ptr };
-        let mut ticks = 0; // just for us priting out during execution
+
+        // just for us priting out during execution
+        let mut ticks = 0; 
 
         // First we run our "main" function
         f();
@@ -328,9 +334,10 @@ impl Runtime {
             // for the next timer. If there is none, we set it to infinite (None)
             let next_timeout = self.get_next_timer();
             println!("NEXT_TIMEOUT: {:?}", next_timeout);
-            // We release the lock before we wait
+
             let mut epoll_timeout_lock = self.epoll_timeout.lock().unwrap();
             *epoll_timeout_lock = next_timeout;
+            // We release the lock before we wait in `recv`
             drop(epoll_timeout_lock);
 
             // We handle one and one event but multiple events could be returned
@@ -363,8 +370,10 @@ impl Runtime {
             thread.sender.send(Event::close()).expect("threadpool cleanup");
             thread.handle.join().unwrap();
         }
+
         self.epoll_registrator.close_loop().unwrap();
         self.epoll_thread.join().unwrap();
+
         print("FINISHED");
     }
 
@@ -385,9 +394,11 @@ impl Runtime {
     fn get_next_timer(&self) -> Option<i32> {
         self.timers.iter().nth(0).map(|(&instant, _)| {
             let mut time_to_next_timeout = instant - Instant::now();
+
             if time_to_next_timeout < Duration::new(0, 0) {
                 time_to_next_timeout = Duration::new(0, 0);
             }
+
             time_to_next_timeout.as_millis() as i32
         })
     }
@@ -405,6 +416,7 @@ impl Runtime {
             .epoll_event_cb_map
             .get(&(event_id as i64))
             .expect("Event not in event map.");
+
         let callback_id = *id;
         self.epoll_event_cb_map.remove(&(event_id as i64));
 
@@ -462,6 +474,7 @@ impl Runtime {
 
         print(format!("Event with id: {} registered.", token));
         self.epoll_event_cb_map.insert(token as i64, token);
+
         self.pending_events += 1;
         self.epoll_pending_events += 1;
     }
@@ -490,10 +503,13 @@ impl Runtime {
     fn set_timeout(&mut self, ms: u64, cb: impl Fn(Js) + 'static) {
         // Is it theoretically possible to get two equal instants? If so we'll have a bug...
         let now = Instant::now();
+
         let cb_id = self.generate_cb_identity();
         self.add_callback(cb_id, cb);
+        
         let timeout = now + Duration::from_millis(ms);
         self.timers.insert(timeout, cb_id);
+        
         self.pending_events += 1;
         print(format!("Registered timer event id: {}", cb_id));
     }
@@ -553,6 +569,7 @@ struct Http;
 impl Http {
     pub fn http_get_slow(url: &str, delay_ms: u32, cb: impl Fn(Js) + 'static + Clone) {
         let rt: &mut Runtime = unsafe { &mut *RUNTIME };
+        
         // Don't worry, http://slowwly.robertomurray.co.uk is a site for simulating a delayed
         // response from a server. Perfect for our use case.
         let mut stream: minimio::TcpStream =
@@ -570,6 +587,7 @@ impl Http {
             .expect("Error writing to stream");
 
         let token = rt.generate_cb_identity();
+
         rt.epoll_registrator
             .register(&mut stream, token, minimio::Interests::readable())
             .unwrap();
@@ -577,9 +595,11 @@ impl Http {
         let wrapped = move |_n| {
             let mut stream = stream;
             let mut buffer = String::new();
+
             stream
                 .read_to_string(&mut buffer)
                 .expect("Stream read error");
+
             cb(Js::String(buffer));
         };
 
@@ -602,6 +622,7 @@ fn print_content(t: impl std::fmt::Display, descr: &str) {
     let lines = content.lines().take(2);
     let main_cont: String = lines.map(|l| format!("{}\n", l)).collect();
     let opt_location = content.find("Location");
+
     let opt_location = opt_location.map(|loc| {
         content[loc..]
         .lines()
@@ -615,6 +636,7 @@ fn print_content(t: impl std::fmt::Display, descr: &str) {
         main_cont,
         opt_location.unwrap_or(String::new())
     );
+    
     println!("===== END CONTENT =====\n");
 }
 
