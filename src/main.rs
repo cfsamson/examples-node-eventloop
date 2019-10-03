@@ -77,31 +77,31 @@ use minimio;
 
 static mut RUNTIME: *mut Runtime = std::ptr::null_mut();
 
-struct Event {
+struct Task {
     task: Box<dyn Fn() -> Js + Send + 'static>,
     callback_id: usize,
-    kind: ThreadPoolEventKind,
+    kind: ThreadPoolTaskKind,
 }
 
-impl Event {
+impl Task {
     fn close() -> Self {
-        Event {
+        Task {
             task: Box::new(|| Js::Undefined),
             callback_id: 0,
-            kind: ThreadPoolEventKind::Close,
+            kind: ThreadPoolTaskKind::Close,
         }
     }
 }
 
-pub enum ThreadPoolEventKind {
+pub enum ThreadPoolTaskKind {
     FileRead,
     Encrypt,
     Close,
 }
 
-impl fmt::Display for ThreadPoolEventKind {
+impl fmt::Display for ThreadPoolTaskKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use ThreadPoolEventKind::*;
+        use ThreadPoolTaskKind::*;
         match self {
             FileRead => write!(f, "File read"),
             Encrypt => write!(f, "Encrypt"),
@@ -141,7 +141,7 @@ impl Js {
 #[derive(Debug)]
 struct NodeThread {
     pub(crate) handle: JoinHandle<()>,
-    sender: Sender<Event>,
+    sender: Sender<Task>,
 }
 
 pub struct Runtime {
@@ -151,8 +151,6 @@ pub struct Runtime {
     callbacks_to_run: Vec<(usize, Js)>,
     /// All registered callbacks
     callback_queue: HashMap<usize, Box<dyn FnOnce(Js)>>,
-    /// Maps an epoll event to a callback
-    epoll_event_cb_map: HashMap<i64, usize>,
     /// Number of pending epoll events, only used by us to print for this example
     epoll_pending_events: usize,
     /// Our event registrator which registers interest in events with the OS
@@ -196,24 +194,24 @@ impl Runtime {
         let mut threads = Vec::with_capacity(4);
 
         for i in 0..4 {
-            let (evt_sender, evt_reciever) = channel::<Event>();
+            let (evt_sender, evt_reciever) = channel::<Task>();
             let event_sender = event_sender.clone();
 
             let handle = thread::Builder::new()
                 .name(format!("pool{}", i))
                 .spawn(move || {
 
-                    while let Ok(event) = evt_reciever.recv() {
-                        print(format!("recived a task of type: {}", event.kind));
+                    while let Ok(task) = evt_reciever.recv() {
+                        print(format!("recived a task of type: {}", task.kind));
                         
-                        if let ThreadPoolEventKind::Close = event.kind {
+                        if let ThreadPoolTaskKind::Close = task.kind {
                             break;
                         };
 
-                        let res = (event.task)();
-                        print(format!("finished running a task of type: {}.", event.kind));
+                        let res = (task.task)();
+                        print(format!("finished running a task of type: {}.", task.kind));
 
-                        let event = PollEvent::Threadpool((i, event.callback_id, res));
+                        let event = PollEvent::Threadpool((i, task.callback_id, res));
                         event_sender.send(event).expect("threadpool");
                     }
                 })
@@ -272,7 +270,6 @@ impl Runtime {
             available_threads: (0..4).collect(),
             callbacks_to_run: vec![],
             callback_queue: HashMap::new(),
-            epoll_event_cb_map: HashMap::new(),
             epoll_pending_events: 0,
             epoll_registrator: registrator,
             epoll_thread,
@@ -367,7 +364,7 @@ impl Runtime {
 
         // We clean up our resources, makes sure all destructors runs.
         for thread in self.thread_pool.into_iter() {
-            thread.sender.send(Event::close()).expect("threadpool cleanup");
+            thread.sender.send(Task::close()).expect("threadpool cleanup");
             thread.handle.join().unwrap();
         }
 
@@ -412,15 +409,7 @@ impl Runtime {
     }
 
     fn process_epoll_events(&mut self, event_id: usize) {
-        let id = self
-            .epoll_event_cb_map
-            .get(&(event_id as i64))
-            .expect("Event not in event map.");
-
-        let callback_id = *id;
-        self.epoll_event_cb_map.remove(&(event_id as i64));
-
-        self.callbacks_to_run.push((callback_id, Js::Undefined));
+        self.callbacks_to_run.push((event_id, Js::Undefined));
         self.epoll_pending_events -= 1;
     }
 
@@ -469,26 +458,24 @@ impl Runtime {
         self.callback_queue.insert(ident, boxed_cb);
     }
 
-    pub fn register_io(&mut self, token: usize, cb: impl FnOnce(Js) + 'static) {
+    pub fn register_event_epoll(&mut self, token: usize, cb: impl FnOnce(Js) + 'static) {
         self.add_callback(token, cb);
 
         print(format!("Event with id: {} registered.", token));
-        self.epoll_event_cb_map.insert(token as i64, token);
-
         self.pending_events += 1;
         self.epoll_pending_events += 1;
     }
 
-    pub fn register_work(
+    pub fn register_event_threadpool(
         &mut self,
         task: impl Fn() -> Js + Send + 'static,
-        kind: ThreadPoolEventKind,
+        kind: ThreadPoolTaskKind,
         cb: impl FnOnce(Js) + 'static,
     ) {
         let callback_id = self.generate_cb_identity();
         self.add_callback(callback_id, cb);
 
-        let event = Event {
+        let event = Task {
             task: Box::new(task),
             callback_id,
             kind,
@@ -542,7 +529,7 @@ impl Crypto {
         };
 
         let rt = unsafe { &mut *RUNTIME };
-        rt.register_work(work, ThreadPoolEventKind::Encrypt, cb);
+        rt.register_event_threadpool(work, ThreadPoolTaskKind::Encrypt, cb);
     }
 }
 
@@ -561,7 +548,7 @@ impl Fs {
             Js::String(buffer)
         };
         let rt = unsafe { &mut *RUNTIME };
-        rt.register_work(work, ThreadPoolEventKind::FileRead, cb);
+        rt.register_event_threadpool(work, ThreadPoolTaskKind::FileRead, cb);
     }
 }
 
@@ -603,7 +590,7 @@ impl Http {
             cb(Js::String(buffer));
         };
 
-        rt.register_io(token, wrapped);
+        rt.register_event_epoll(token, wrapped);
     }
 }
 

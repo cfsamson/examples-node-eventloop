@@ -4,13 +4,13 @@
 name = "js_event_loop"
 version = "0.1.0"
 dependencies = [
- "minimio 0.1.0 (git+https://github.com/cfsamson/examples-io-eventloop)",
+ "minimio 0.1.0 (git+https://github.com/cfsamson/examples-io-eventloop?branch=dev)",
 ]
 
 [[package]]
 name = "minimio"
 version = "0.1.0"
-source = "git+https://github.com/cfsamson/examples-io-eventloop#166f0842fe182f7c9c9a34e23f0db2727f57ebfb"
+source = "git+https://github.com/cfsamson/examples-io-eventloop?branch=dev#68c6577dcfe5900f2ebf3108c907d324e1e77843"
 
 [metadata]
-"checksum minimio 0.1.0 (git+https://github.com/cfsamson/examples-io-eventloop)" = "<none>"
+"checksum minimio 0.1.0 (git+https://github.com/cfsamson/examples-io-eventloop?branch=dev)" = "<none>"
