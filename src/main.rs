@@ -260,7 +260,7 @@ impl Runtime {
                             break;
                         }
                         Err(e) => panic!("{:?}", e),
-                        _ => (),
+                        _ => unreachable!(),
                     }
                 }
             })
