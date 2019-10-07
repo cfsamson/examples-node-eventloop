@@ -330,7 +330,6 @@ impl Runtime {
             // set the timeout of our epoll wait to the same as the timeout
             // for the next timer. If there is none, we set it to infinite (None)
             let next_timeout = self.get_next_timer();
-            println!("NEXT_TIMEOUT: {:?}", next_timeout);
 
             let mut epoll_timeout_lock = self.epoll_timeout.lock().unwrap();
             *epoll_timeout_lock = next_timeout;

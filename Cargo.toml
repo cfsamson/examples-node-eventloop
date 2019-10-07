@@ -1,5 +1,5 @@
 [package]
-name = "js_event_loop"
+name = "examples_io_event_loop"
 version = "0.1.0"
 authors = ["Carl Fredrik Samson <cf@samson.no>"]
 edition = "2018"
