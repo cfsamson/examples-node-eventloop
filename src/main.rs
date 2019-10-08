@@ -558,8 +558,8 @@ impl Http {
         
         // Don't worry, http://slowwly.robertomurray.co.uk is a site for simulating a delayed
         // response from a server. Perfect for our use case.
-        let mut stream: minimio::TcpStream =
-            minimio::TcpStream::connect("slowwly.robertomurray.co.uk:80").unwrap();
+        let adr = "slowwly.robertomurray.co.uk:80";
+        let mut stream = minimio::TcpStream::connect(adr).unwrap();
         let request = format!(
             "GET /delay/{}/url/http://{} HTTP/1.1\r\n\
              Host: slowwly.robertomurray.co.uk\r\n\
