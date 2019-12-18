@@ -4,13 +4,13 @@
 name = "examples_io_event_loop"
 version = "0.1.0"
 dependencies = [
- "minimio 0.1.0 (git+https://github.com/cfsamson/examples-minimio?branch=dev)",
+ "minimio 0.1.0 (git+https://github.com/cfsamson/examples-minimio?branch=node-experiment)",
 ]
 
 [[package]]
 name = "minimio"
 version = "0.1.0"
-source = "git+https://github.com/cfsamson/examples-minimio?branch=dev#68c6577dcfe5900f2ebf3108c907d324e1e77843"
+source = "git+https://github.com/cfsamson/examples-minimio?branch=node-experiment#adade7634fd28f35a952830f705fc9423bdaccb4"
 
 [metadata]
-"checksum minimio 0.1.0 (git+https://github.com/cfsamson/examples-minimio?branch=dev)" = "<none>"
+"checksum minimio 0.1.0 (git+https://github.com/cfsamson/examples-minimio?branch=node-experiment)" = "<none>"
