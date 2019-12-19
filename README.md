@@ -6,9 +6,9 @@ Node is a good example since they use two different strategies for handling asyn
 
 This is part of my goal to explain Futures in Rust from the ground up. To understand even the most high level concept truly we need to understand what's happening on the low level or else there will be too much magic which prevents any profound understanding of the subject. 
 
-**Updates:**
+### Updates:
 
-### 2019-12-18
+#### 2019-12-18
 
 Working on the book explaining the Epoll/IOCP/Kqueue implementation backing this event loop I have made some minor revisions to the API, and a bigger change to the underlying `IOCP` implementation.
 
