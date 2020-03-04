@@ -432,21 +432,14 @@ impl Runtime {
     }
 
     fn generate_cb_identity(&mut self) -> usize {
-        let ident = self.generate_identity();
-        let taken = self.callback_queue.contains_key(&ident);
-
         // if there is a collision or the identity is already there we loop until we find a new one
         // we don't cover the case where there are `usize::MAX` number of callbacks waiting since
         // that if we're fast and queue a new event every nanosecond that will still take 585.5 years
         // to do on a 64 bit system.
-        if !taken {
-            ident
-        } else {
-            loop {
-                let possible_ident = self.generate_identity();
-                if self.callback_queue.contains_key(&possible_ident) {
-                    break possible_ident;
-                }
+        loop {
+            let ident = self.generate_identity();
+            if !self.callback_queue.contains_key(&ident) {
+                break ident;
             }
         }
     }
