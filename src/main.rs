@@ -194,14 +194,14 @@ impl Runtime {
         let mut threads = Vec::with_capacity(4);
 
         for i in 0..4 {
-            let (evt_sender, evt_reciever) = channel::<Task>();
+            let (task_sender, task_reciever) = channel::<Task>();
             let event_sender = event_sender.clone();
 
             let handle = thread::Builder::new()
                 .name(format!("pool{}", i))
                 .spawn(move || {
 
-                    while let Ok(task) = evt_reciever.recv() {
+                    while let Ok(task) = task_reciever.recv() {
                         print(format!("recived a task of type: {}", task.kind));
                         
                         if let ThreadPoolTaskKind::Close = task.kind {
@@ -219,7 +219,7 @@ impl Runtime {
 
             let node_thread = NodeThread {
                 handle,
-                sender: evt_sender,
+                sender: task_sender,
             };
 
             threads.push(node_thread);
@@ -575,7 +575,7 @@ impl Http {
         let token = rt.generate_cb_identity();
 
         rt.epoll_registrator
-            .register(&mut stream, token, minimio::Interests::READABLE)
+            .register(&stream, token, minimio::Interests::READABLE)
             .unwrap();
 
         let wrapped = move |_n| {
