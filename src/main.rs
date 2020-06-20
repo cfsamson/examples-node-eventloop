@@ -575,7 +575,7 @@ impl Http {
         let token = rt.generate_cb_identity();
 
         rt.epoll_registrator
-            .register(&stream, token, minimio::Interests::READABLE)
+            .register(&mut stream, token, minimio::Interests::READABLE)
             .unwrap();
 
         let wrapped = move |_n| {
